@@ -1,0 +1,159 @@
+#!/bin/bash
+# Correlated evaluation array for model_zoo_production_array.batch.
+# Uses a common generation RNG and identical L500 Jan-2026 windows for all runs.
+#SBATCH --job-name=sigma0-zoo-lobbench
+#SBATCH --array=0-17%6
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:4
+#SBATCH --cpus-per-task=72
+#SBATCH --mem=0
+#SBATCH --time=03:00:00
+#SBATCH --output=model_zoo_lobbench_%A_%a.out
+#SBATCH --error=model_zoo_lobbench_%A_%a.err
+
+set -euo pipefail
+
+ARCHITECTURES=(mamba3 s5 gdn kda transformer nsa)
+TRAIN_SEEDS=(5 42 137)
+TASK_ID=${SLURM_ARRAY_TASK_ID:?SLURM_ARRAY_TASK_ID is required}
+ARCH_INDEX=$((TASK_ID / ${#TRAIN_SEEDS[@]}))
+SEED_INDEX=$((TASK_ID % ${#TRAIN_SEEDS[@]}))
+if [ "$ARCH_INDEX" -ge "${#ARCHITECTURES[@]}" ]; then
+    echo "Invalid model-zoo LOBBench task: $TASK_ID" >&2
+    exit 2
+fi
+
+ARCHITECTURE=${ARCHITECTURES[$ARCH_INDEX]}
+TRAIN_SEED=${TRAIN_SEEDS[$SEED_INDEX]}
+WORKDIR="${WORKDIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
+SIGMA0_SHARED_ROOT="${SIGMA0_SHARED_ROOT:-/projects/u6gb/public/sigma-0}"
+MODEL_ZOO_ARTIFACT_ROOT="${MODEL_ZOO_ARTIFACT_ROOT:-$SIGMA0_SHARED_ROOT/artifacts/model_zoo_26tok}"
+BENCHMARK_ROOT="${LOBBENCH_ROOT:-/lus/lfs1aip2/projects/public/s5e/quant_team/quant/AlphaTrade/lob_pipeline}"
+QUANT_ROOT="${QUANT_ROOT:-/lus/lfs1aip2/projects/public/s5e/quant_team/quant}"
+PYTHON="${PYTHON:-$QUANT_ROOT/miniforge3/bin/python}"
+CHECKPOINT_BASE="$MODEL_ZOO_ARTIFACT_ROOT/checkpoints/$ARCHITECTURE/seed_$TRAIN_SEED"
+CHECKPOINT_PATH="$CHECKPOINT_BASE/run"
+VALIDATION_JSON="$MODEL_ZOO_ARTIFACT_ROOT/validation_ce/$ARCHITECTURE/seed_$TRAIN_SEED.json"
+LOBBENCH_CE_TARGET="${LOBBENCH_CE_TARGET:-0.65}"
+LOBBENCH_N_SEQUENCES="${LOBBENCH_N_SEQUENCES:-3136}"
+INFERENCE_BATCH_SIZE="${INFERENCE_BATCH_SIZE:-8}"
+INFERENCE_WORLD_SIZE=4
+RUN_NAME="sigma0-${ARCHITECTURE}-s${TRAIN_SEED}"
+OUTPUT_ROOT="$MODEL_ZOO_ARTIFACT_ROOT/evaluation/$ARCHITECTURE/seed_$TRAIN_SEED"
+INFERENCE_DIR="$OUTPUT_ROOT/inference"
+
+module load cuda/12.6
+CONDA_PREFIX="$QUANT_ROOT/miniforge3"
+NVIDIA_SITE="$CONDA_PREFIX/lib/python3.12/site-packages/nvidia"
+TORCH_LIB="$CONDA_PREFIX/lib/python3.12/site-packages/torch/lib"
+export PATH="$CONDA_PREFIX/bin:$PATH"
+export LD_LIBRARY_PATH="$TORCH_LIB:$NVIDIA_SITE/cuda_nvrtc/lib:$NVIDIA_SITE/cuda_runtime/lib:$NVIDIA_SITE/cusparse/lib:$NVIDIA_SITE/cuda_cupti/lib:$NVIDIA_SITE/cufft/lib:$NVIDIA_SITE/nvjitlink/lib:$NVIDIA_SITE/cusolver/lib:$NVIDIA_SITE/nccl/lib:$NVIDIA_SITE/cublas/lib:$NVIDIA_SITE/cudnn/lib:$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+export PYTHONPATH="$WORKDIR/src:$WORKDIR:${PYTHONPATH:-}"
+export PYTHONNOUSERSITE=1
+export XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.90}"
+export TMPDIR=/tmp
+mkdir -p "$INFERENCE_DIR" "$OUTPUT_ROOT"
+"$PYTHON" -c 'import jax, torch; backend = jax.default_backend(); assert backend == "gpu", f"expected JAX GPU backend, got {backend}"; print(f"[cuda-preflight] jax={backend} torch={torch.__version__}")'
+
+CURRENT_COMMIT=$(git -C "$WORKDIR" rev-parse HEAD)
+if [ -n "${EXPECTED_COMMIT:-}" ] && [ "$CURRENT_COMMIT" != "$EXPECTED_COMMIT" ]; then
+    echo "Refusing code drift: expected $EXPECTED_COMMIT, found $CURRENT_COMMIT" >&2
+    exit 2
+fi
+
+# The final outcome is LOBBench, but the checkpoint is fixed without touching
+# January-2026 test data: choose the checkpoint closest to the predeclared
+# December-2025 validation CE target.
+[ -f "$VALIDATION_JSON" ] || { echo "Missing validation result: $VALIDATION_JSON" >&2; exit 2; }
+SELECTION=$(
+    "$PYTHON" - "$VALIDATION_JSON" "$LOBBENCH_CE_TARGET" <<'PY'
+import json
+import sys
+
+path, requested = sys.argv[1:]
+with open(path) as handle:
+    payload = json.load(handle)
+target = format(float(requested), ".6g")
+selection = payload.get("selection", {}).get("iso_ce", {}).get(target)
+if not selection:
+    raise SystemExit(f"validation target {target} is absent from {path}")
+if selection.get("status") != "matched":
+    raise SystemExit(
+        f"validation target {target} is not matched: {selection.get('status')} "
+        f"(closest CE={selection.get('validation_ce')}, delta={selection.get('delta')})"
+    )
+print(f"{int(selection['step'])} {float(selection['validation_ce']):.10g}")
+PY
+)
+read -r CHECKPOINT_STEP MATCHED_VALIDATION_CE <<< "$SELECTION"
+[ -d "$CHECKPOINT_PATH/$CHECKPOINT_STEP/state" ] || {
+    echo "Selected checkpoint is incomplete: $CHECKPOINT_PATH/$CHECKPOINT_STEP" >&2
+    exit 2
+}
+
+# inference.py pads each rank to a full batch. The paper pool must remain the
+# predeclared 3,136 unique windows, so reject settings that would add repeated
+# padding rows rather than silently changing the evaluated sample.
+if [ $((LOBBENCH_N_SEQUENCES % (INFERENCE_WORLD_SIZE * INFERENCE_BATCH_SIZE))) -ne 0 ]; then
+    echo "LOBBench pool $LOBBENCH_N_SEQUENCES is not divisible by world_size=$INFERENCE_WORLD_SIZE x batch_size=$INFERENCE_BATCH_SIZE; refusing padded duplicate windows" >&2
+    exit 2
+fi
+
+echo "[lobbench] task=$TASK_ID architecture=$ARCHITECTURE train_seed=$TRAIN_SEED"
+echo "[lobbench] checkpoint=$CHECKPOINT_PATH step=$CHECKPOINT_STEP validation_ce=$MATCHED_VALIDATION_CE target=$LOBBENCH_CE_TARGET"
+echo "[lobbench] common generation seed=${GENERATION_SEED:-2026}"
+
+source "$BENCHMARK_ROOT/pipeline/_squashfs_helpers.sh"
+infer_squashfs_setup \
+    GOOG "${INFERENCE_MONTHS:-2026-01}" \
+    "${INFERENCE_SQUASHFS_DIR:-/lus/lfs1aip2/projects/public/s5e/quant_team/lob_preproc_sp500_squashfs}"
+infer_squashfs_setup_wide_book \
+    GOOG "${INFERENCE_MONTHS:-2026-01}" \
+    "${WIDE_SQUASHFS_DIR:-/projects/public/s5e/quant_team/recon_2026-05/output/squashfs}" \
+    "${WIDE_LEVELS:-500}"
+trap infer_squashfs_cleanup EXIT
+
+PIDS=()
+for LOCAL_RANK in 0 1 2 3; do
+    CUDA_VISIBLE_DEVICES=$LOCAL_RANK "$PYTHON" -u -B \
+        "$WORKDIR/run/base_model/runtime/inference.py" \
+        --architecture="$ARCHITECTURE" \
+        --token_mode=26tok \
+        --ckpt_path="$CHECKPOINT_PATH" \
+        --checkpoint_step="$CHECKPOINT_STEP" \
+        --data_dir="$INFER_DATA_DIR_NODE" \
+        --wide_book_dir="$INFER_WIDE_BOOK_DIR_NODE" \
+        --wide_levels="${WIDE_LEVELS:-500}" \
+        --save_dir="$INFERENCE_DIR" \
+        --stock=GOOG \
+        --n_sequences="$LOBBENCH_N_SEQUENCES" \
+        --batch_size="$INFERENCE_BATCH_SIZE" \
+        --n_cond_msgs="${N_COND_MSGS:-500}" \
+        --n_gen_msgs="${N_GEN_MSGS:-500}" \
+        --seed="${GENERATION_SEED:-2026}" \
+        --rank="$LOCAL_RANK" --world_size="$INFERENCE_WORLD_SIZE" \
+        > "$OUTPUT_ROOT/inference_rank${LOCAL_RANK}.log" 2>&1 &
+    PIDS+=("$!")
+done
+
+INFERENCE_EXIT=0
+for i in "${!PIDS[@]}"; do
+    if ! wait "${PIDS[$i]}"; then
+        echo "Inference rank $i failed; see $OUTPUT_ROOT/inference_rank${i}.log" >&2
+        INFERENCE_EXIT=1
+    fi
+done
+[ "$INFERENCE_EXIT" -eq 0 ] || exit "$INFERENCE_EXIT"
+
+"$PYTHON" -u -B "$WORKDIR/run/benchmarking/run_lobbench.py" \
+    --run-name="$RUN_NAME" \
+    --inference-dir="$INFERENCE_DIR" \
+    --output-dir="$OUTPUT_ROOT/lobbench" \
+    --stock=GOOG --period=2026-01 \
+    --benchmark-root="$BENCHMARK_ROOT" \
+    --python="$PYTHON" --n-workers="${LOBBENCH_WORKERS:-48}" \
+    --run-id=production \
+    --summary="$OUTPUT_ROOT/lobbench_summary.json"
+
+echo "[lobbench] complete: $OUTPUT_ROOT/lobbench_summary.json"

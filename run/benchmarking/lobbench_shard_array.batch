@@ -1,0 +1,107 @@
+#!/bin/bash
+# CPU-only LOBBench scoring, one array task per shard of the mode's scores.
+#
+# The array scores shards; a second submission with LOBBENCH_MERGE=1 combines
+# them.  Splitting the two means a shard that dies leaves a missing file that
+# the merge refuses, rather than a merged result that is quietly short.
+#
+#   sbatch --array=0-2 --export=ALL,INFERENCE_DIR=...,LOBBENCH_OUTPUT=... \
+#          run/benchmarking/lobbench_shard_array.batch
+#   sbatch --dependency=afterok:<array_job> \
+#          --export=ALL,LOBBENCH_MERGE=1,SHARD_COUNT=3,INFERENCE_DIR=...,... \
+#          run/benchmarking/lobbench_shard_array.batch
+#
+#SBATCH --job-name=sigma0-lobbench-shard
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=72
+#SBATCH --mem=0
+#SBATCH --time=04:00:00
+#SBATCH --output=lobbench_shard_%A_%a.out
+#SBATCH --error=lobbench_shard_%A_%a.err
+
+set -euo pipefail
+
+WORKDIR="${WORKDIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
+INFERENCE_DIR="${INFERENCE_DIR:?INFERENCE_DIR is required}"
+LOBBENCH_OUTPUT="${LOBBENCH_OUTPUT:?LOBBENCH_OUTPUT is required}"
+RUN_NAME="${RUN_NAME:?RUN_NAME is required}"
+QUANT_ROOT="${QUANT_ROOT:-/lus/lfs1aip2/projects/public/s5e/quant_team/quant}"
+PYTHON="${PYTHON:-$QUANT_ROOT/miniforge3/bin/python}"
+SCORING_PYTHON="${SCORING_PYTHON:-$PYTHON}"
+BENCHMARK_ROOT="${LOBBENCH_ROOT:-$QUANT_ROOT/AlphaTrade/lob_pipeline}"
+MODE="${LOBBENCH_MODE:-uncond}"
+STOCK="${STOCK:-GOOG}"
+PERIOD="${PERIOD:-2026-01}"
+RUN_ID="${RUN_ID:-sigma0}"
+MERGE="${LOBBENCH_MERGE:-0}"
+
+CURRENT_COMMIT=$(git -C "$WORKDIR" rev-parse HEAD)
+if [ -n "${EXPECTED_COMMIT:-}" ] && [ "$CURRENT_COMMIT" != "$EXPECTED_COMMIT" ]; then
+    echo "Refusing code drift: expected $EXPECTED_COMMIT, found $CURRENT_COMMIT" >&2
+    exit 2
+fi
+CURRENT_LOBBENCH_REVISION=$(git -C "$BENCHMARK_ROOT" rev-parse HEAD)
+if [ -n "${EXPECTED_LOBBENCH_REVISION:-}" ] && \
+        [ "$CURRENT_LOBBENCH_REVISION" != "$EXPECTED_LOBBENCH_REVISION" ]; then
+    echo "Refusing LOBBench drift: expected $EXPECTED_LOBBENCH_REVISION, found $CURRENT_LOBBENCH_REVISION" >&2
+    exit 2
+fi
+
+if [ "$MERGE" = "1" ]; then
+    SHARD_COUNT="${SHARD_COUNT:?SHARD_COUNT is required when LOBBENCH_MERGE=1}"
+    JOB_TMP="/tmp/${USER:-${LOGNAME:-unknown}}/sigma0/${SLURM_JOB_ID}_merge"
+else
+    SHARD_INDEX="${SLURM_ARRAY_TASK_ID:?SLURM_ARRAY_TASK_ID is required (or set LOBBENCH_MERGE=1)}"
+    SHARD_COUNT="${SHARD_COUNT:-${SLURM_ARRAY_TASK_COUNT:?SHARD_COUNT or SLURM_ARRAY_TASK_COUNT is required}}"
+    JOB_TMP="/tmp/${USER:-${LOGNAME:-unknown}}/sigma0/${SLURM_JOB_ID}_${SHARD_INDEX}"
+fi
+
+mkdir -p "$LOBBENCH_OUTPUT" "$JOB_TMP"
+export TMPDIR="$JOB_TMP"
+export MPLCONFIGDIR="$JOB_TMP/matplotlib"
+mkdir -p "$MPLCONFIGDIR"
+export PYTHONPATH="$WORKDIR/src:$WORKDIR:${PYTHONPATH:-}"
+export PYTHONNOUSERSITE=1
+export JAX_PLATFORMS=cpu
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
+
+COMMON=(
+    --run-name="$RUN_NAME"
+    --output-dir="$LOBBENCH_OUTPUT"
+    --stock="$STOCK" --period="$PERIOD"
+    --benchmark-root="$BENCHMARK_ROOT"
+    --run-id="$RUN_ID"
+    --mode="$MODE"
+)
+# The unconditional mode carries the divergence-over-time curve by default;
+# NO_DIVERGENCE=1 opts out, DIVERGENCE_HORIZON resizes its windows, and
+# TIME_LAG overrides the time_lagged mode's lag (required whenever
+# cond+gen <= 500, where the config default drops every sequence).
+if [ -n "${DIVERGENCE_HORIZON:-}" ]; then
+    COMMON+=(--divergence-horizon="$DIVERGENCE_HORIZON")
+fi
+if [ "${NO_DIVERGENCE:-0}" = "1" ]; then
+    COMMON+=(--no-divergence)
+fi
+if [ -n "${TIME_LAG:-}" ]; then
+    COMMON+=(--time-lag="$TIME_LAG")
+fi
+
+if [ "$MERGE" = "1" ]; then
+    echo "[lobbench] merging $SHARD_COUNT shards mode=$MODE revision=$CURRENT_LOBBENCH_REVISION"
+    "$PYTHON" -u -B "$WORKDIR/run/benchmarking/run_lobbench.py" \
+        "${COMMON[@]}" --merge --shard-count="$SHARD_COUNT" \
+        ${SUMMARY:+--summary="$SUMMARY"}
+    echo "[lobbench] merge complete"
+    exit 0
+fi
+
+echo "[lobbench] shard $SHARD_INDEX/$SHARD_COUNT mode=$MODE revision=$CURRENT_LOBBENCH_REVISION"
+"$PYTHON" -u -B "$WORKDIR/run/benchmarking/run_lobbench.py" \
+    "${COMMON[@]}" \
+    --inference-dir="$INFERENCE_DIR" \
+    --python="$SCORING_PYTHON" \
+    --n-workers="${LOBBENCH_WORKERS:-48}" \
+    --shard-index="$SHARD_INDEX" --shard-count="$SHARD_COUNT"
+echo "[lobbench] shard $SHARD_INDEX complete"

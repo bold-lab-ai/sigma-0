@@ -1,0 +1,61 @@
+#!/bin/bash
+# Final after-any status reconciliation for the generation -> score chain.
+#SBATCH --job-name=sigma0-st-lobfinal
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=2G
+#SBATCH --time=00:10:00
+
+set -euo pipefail
+
+: "${LAUNCHER_WORKDIR:?LAUNCHER_WORKDIR is required}"
+: "${TASK_ROOT:?TASK_ROOT is required}"
+: "${SMOKE_JOB:?SMOKE_JOB is required}"
+: "${GENERATION_JOB:?GENERATION_JOB is required}"
+: "${SCORE_JOB:?SCORE_JOB is required}"
+
+QUANT_ROOT="${QUANT_ROOT:-/lus/lfs1aip2/projects/public/s5e/quant_team/quant}"
+PYTHON="${PYTHON:-$QUANT_ROOT/miniforge3/bin/python}"
+STATE_HELPER="$LAUNCHER_WORKDIR/run/benchmarking/update_selftrain_lobbench_state.py"
+SUMMARY="$TASK_ROOT/evaluation/lobbench_summary.json"
+
+SMOKE_STATE=$(sacct -X -j "$SMOKE_JOB" --noheader --parsable2 \
+    --format=State | head -n 1 | cut -d'|' -f1)
+GENERATION_STATE=$(sacct -X -j "$GENERATION_JOB" --noheader --parsable2 \
+    --format=State | head -n 1 | cut -d'|' -f1)
+SCORE_STATE=$(sacct -X -j "$SCORE_JOB" --noheader --parsable2 \
+    --format=State | head -n 1 | cut -d'|' -f1)
+
+if [ -f "$SUMMARY" ]; then
+    METRIC=$("$PYTHON" - "$SUMMARY" <<'PY'
+import json
+import sys
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+if payload.get("feature_count") != 21:
+    raise SystemExit("formal LOBBench feature_count is not 21")
+for key in ("ws21", "ks21", "l1_21"):
+    if payload.get(key) is None:
+        raise SystemExit(f"formal LOBBench summary is missing {key}")
+print(
+    f"ws21={payload['ws21']:.10g},"
+    f"ks21={payload['ks21']:.10g},"
+    f"l1_21={payload['l1_21']:.10g}"
+)
+PY
+)
+    "$PYTHON" "$STATE_HELPER" \
+        --task-root "$TASK_ROOT" \
+        --state eval_done \
+        --job-id "$SLURM_JOB_ID" \
+        --action finalizer_verified_summary \
+        --metric "$METRIC"
+else
+    "$PYTHON" "$STATE_HELPER" \
+        --task-root "$TASK_ROOT" \
+        --state failed \
+        --job-id "$SLURM_JOB_ID" \
+        --action finalizer_missing_summary \
+        --metric "smoke=$SMOKE_STATE,generation=$GENERATION_STATE,score=$SCORE_STATE" \
+        --alert "No complete 21-feature summary; inspect task-root SLURM logs"
+fi

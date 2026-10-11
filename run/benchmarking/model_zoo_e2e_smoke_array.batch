@@ -1,0 +1,104 @@
+#!/bin/bash
+# Tiny real-data inference -> authoritative LOBBench gate for every architecture.
+# This is deliberately separate from production: eight sequences and one
+# feature prove the port end to end without being used as a paper result.
+#SBATCH --job-name=sigma0-zoo-e2e
+#SBATCH --array=0-5%3
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=115000M
+#SBATCH --time=00:30:00
+#SBATCH --output=model_zoo_e2e_%A_%a.out
+#SBATCH --error=model_zoo_e2e_%A_%a.err
+
+set -euo pipefail
+
+ARCHITECTURES=(mamba3 s5 gdn kda transformer nsa)
+TASK_ID=${SLURM_ARRAY_TASK_ID:?SLURM_ARRAY_TASK_ID is required}
+if [ "$TASK_ID" -lt 0 ] || [ "$TASK_ID" -ge "${#ARCHITECTURES[@]}" ]; then
+    echo "Invalid model-zoo e2e task: $TASK_ID" >&2
+    exit 2
+fi
+
+ARCHITECTURE=${ARCHITECTURES[$TASK_ID]}
+WORKDIR="${WORKDIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
+CURRENT_COMMIT=$(git -C "$WORKDIR" rev-parse HEAD)
+if [ -n "${EXPECTED_COMMIT:-}" ] && [ "$CURRENT_COMMIT" != "$EXPECTED_COMMIT" ]; then
+    echo "Refusing code drift: expected $EXPECTED_COMMIT, found $CURRENT_COMMIT" >&2
+    exit 2
+fi
+
+QUANT_ROOT="${QUANT_ROOT:-/lus/lfs1aip2/projects/public/s5e/quant_team/quant}"
+BENCHMARK_ROOT="${LOBBENCH_ROOT:-$QUANT_ROOT/AlphaTrade/lob_pipeline}"
+PYTHON="${PYTHON:-$QUANT_ROOT/miniforge3/bin/python}"
+CHECKPOINT_SCAN_ROOT="${CHECKPOINT_SCAN_ROOT:-$WORKDIR/checkpoints}"
+SIGMA0_SHARED_ROOT="${SIGMA0_SHARED_ROOT:-/projects/u6gb/public/sigma-0}"
+MODEL_ZOO_ARTIFACT_ROOT="${MODEL_ZOO_ARTIFACT_ROOT:-$SIGMA0_SHARED_ROOT/artifacts/model_zoo_26tok}"
+OUTPUT_ROOT="$MODEL_ZOO_ARTIFACT_ROOT/e2e_smoke/$ARCHITECTURE/job_${SLURM_JOB_ID}"
+INFERENCE_DIR="$OUTPUT_ROOT/inference"
+SIGMA0_JOB_TMPDIR="${SIGMA0_JOB_TMPDIR:-/tmp/${USER:-${LOGNAME:-unknown}}/sigma0/${SLURM_JOB_ID}_${SLURM_PROCID:-0}}"
+
+mkdir -p "$INFERENCE_DIR" "$OUTPUT_ROOT" "$SIGMA0_JOB_TMPDIR"
+export TMPDIR="$SIGMA0_JOB_TMPDIR"
+module load cuda/12.6
+CONDA_PREFIX="$QUANT_ROOT/miniforge3"
+NVIDIA_SITE="$CONDA_PREFIX/lib/python3.12/site-packages/nvidia"
+TORCH_LIB="$CONDA_PREFIX/lib/python3.12/site-packages/torch/lib"
+export PATH="$CONDA_PREFIX/bin:$PATH"
+# The JAX CUDA plugin wheels dlopen these libraries. Loading the system CUDA
+# module alone is insufficient on Isambard and silently falls back to CPU.
+export LD_LIBRARY_PATH="$TORCH_LIB:$NVIDIA_SITE/cuda_nvrtc/lib:$NVIDIA_SITE/cuda_runtime/lib:$NVIDIA_SITE/cusparse/lib:$NVIDIA_SITE/cuda_cupti/lib:$NVIDIA_SITE/cufft/lib:$NVIDIA_SITE/nvjitlink/lib:$NVIDIA_SITE/cusolver/lib:$NVIDIA_SITE/nccl/lib:$NVIDIA_SITE/cublas/lib:$NVIDIA_SITE/cudnn/lib:$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+export PYTHONPATH="$WORKDIR/src:$WORKDIR:${PYTHONPATH:-}"
+export PYTHONNOUSERSITE=1
+export XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.90}"
+"$PYTHON" -c 'import jax, torch; backend = jax.default_backend(); assert backend == "gpu", f"expected JAX GPU backend, got {backend}"; print(f"[cuda-preflight] jax={backend} torch={torch.__version__}")'
+
+SELECTION=$(
+    "$PYTHON" "$WORKDIR/run/base_model/find_model_zoo_checkpoint.py" \
+        --root "$CHECKPOINT_SCAN_ROOT" \
+        --architecture "$ARCHITECTURE" \
+        --d-model 64 --n-layers 2
+)
+read -r CHECKPOINT_PATH CHECKPOINT_STEP <<< "$SELECTION"
+
+source "$BENCHMARK_ROOT/pipeline/_squashfs_helpers.sh"
+infer_squashfs_setup \
+    GOOG "${INFERENCE_MONTHS:-2026-01}" \
+    "${INFERENCE_SQUASHFS_DIR:-/lus/lfs1aip2/projects/public/s5e/quant_team/lob_preproc_sp500_squashfs}"
+infer_squashfs_setup_wide_book \
+    GOOG "${INFERENCE_MONTHS:-2026-01}" \
+    "${WIDE_SQUASHFS_DIR:-/projects/public/s5e/quant_team/recon_2026-05/output/squashfs}" \
+    "${WIDE_LEVELS:-500}"
+trap infer_squashfs_cleanup EXIT
+
+echo "[e2e-smoke] architecture=$ARCHITECTURE checkpoint=$CHECKPOINT_PATH step=$CHECKPOINT_STEP"
+"$PYTHON" -u -B "$WORKDIR/run/base_model/runtime/inference.py" \
+    --architecture="$ARCHITECTURE" \
+    --token_mode=26tok \
+    --ckpt_path="$CHECKPOINT_PATH" \
+    --checkpoint_step="$CHECKPOINT_STEP" \
+    --data_dir="$INFER_DATA_DIR_NODE" \
+    --wide_book_dir="$INFER_WIDE_BOOK_DIR_NODE" \
+    --wide_levels="${WIDE_LEVELS:-500}" \
+    --save_dir="$INFERENCE_DIR" \
+    --stock=GOOG \
+    --n_sequences="${E2E_N_SEQUENCES:-8}" \
+    --batch_size="${E2E_BATCH_SIZE:-1}" \
+    --n_cond_msgs="${E2E_N_COND_MSGS:-16}" \
+    --n_gen_msgs="${E2E_N_GEN_MSGS:-32}" \
+    --seed="${E2E_GENERATION_SEED:-2026}"
+
+"$PYTHON" -u -B "$WORKDIR/run/benchmarking/run_lobbench.py" \
+    --run-name="sigma0-${ARCHITECTURE}-e2e" \
+    --inference-dir="$INFERENCE_DIR" \
+    --output-dir="$OUTPUT_ROOT/lobbench" \
+    --stock=GOOG --period=2026-01 \
+    --benchmark-root="$BENCHMARK_ROOT" \
+    --python="$PYTHON" --n-workers="${E2E_LOBBENCH_WORKERS:-4}" \
+    --features=spread \
+    --run-id="smoke-${SLURM_JOB_ID}" \
+    --summary="$OUTPUT_ROOT/lobbench_summary.json"
+
+echo "[e2e-smoke] complete architecture=$ARCHITECTURE summary=$OUTPUT_ROOT/lobbench_summary.json"

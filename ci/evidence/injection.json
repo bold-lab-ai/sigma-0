@@ -1,0 +1,92 @@
+{
+  "assertions": [
+    {
+      "metric": "injection.book_injection_windows_pass",
+      "name": "every window shows the injected order in the book",
+      "op": "==",
+      "value": 4,
+      "why": "between I's book rows k-1 and k the engine processed exactly one message; the delta must be +qty at the derived price and nothing else"
+    },
+    {
+      "metric": "injection.windows",
+      "name": "window count is what the rollout produced",
+      "op": "==",
+      "value": 4
+    },
+    {
+      "metric": "injection.preconditions_pass",
+      "name": "J4 preconditions held (uncrossed, passive, mid determinate)",
+      "op": "==",
+      "value": 1
+    },
+    {
+      "metric": "injection.overall_pass",
+      "name": "the checker's own verdict",
+      "op": "==",
+      "value": 1,
+      "why": "overall_pass reads J4 alone; static wiring tests (tests/unit/test_injection_wiring.py) enforce off-means-off"
+    }
+  ],
+  "inputs": {
+    "arm_digest_i": "1314cf9406de0b0c2b73023258d7d426d3c3ff50e118c06aa895f355737767a5",
+    "arm_digest_o": "63d7398fc30f91e11fce9eae24487462a6857d81086ec19e0e50c29b007bd180",
+    "arm_digest_p": null,
+    "arm_digest_p2": null,
+    "batch_size": 1,
+    "checkpoint_step": 28730,
+    "ckpt_metadata_sha256": "c3c113461f0531ca755c7676cdd0e5009472ad3299506aa4763501ef0cfa08dc",
+    "ckpt_pin": "m3-goog-78m-u6gb",
+    "commit_oi": null,
+    "commit_p": null,
+    "data_day": "GOOG_2026-01-02",
+    "digest": "1314cf9406de0b0c2b73023258d7d426d3c3ff50e118c06aa895f355737767a5",
+    "gpu": "0",
+    "inject_event_type": 1,
+    "inject_price_offset_ticks": -1,
+    "inject_qty": 777,
+    "inject_side": 1,
+    "inject_step": 8,
+    "n_cond_msgs": 16,
+    "n_gen_msgs": 32,
+    "n_windows": 4,
+    "node": "nid010412",
+    "seed": 42,
+    "tick_size": 100
+  },
+  "kind": "injection",
+  "metrics": {
+    "injection": {
+      "book_injection_pass": 1,
+      "book_injection_windows_pass": 4,
+      "determinism_control_pass": 0,
+      "msg_prefix_through_k_identical": 1,
+      "msg_row_k_pass": 1,
+      "off_files_compared": 0,
+      "off_means_off_pass": 0,
+      "off_mismatches": 0,
+      "orderbook_first_divergence_max": 8,
+      "orderbook_first_divergence_min": 8,
+      "overall_pass": 1,
+      "preconditions_pass": 1,
+      "prefix_pass": 1,
+      "provenance_prefix_pass": 1,
+      "windows": 4
+    }
+  },
+  "recorded": {
+    "branch": "feat/cleanup-4-finish-rename",
+    "commit": "89ed62ca4e4bb227155035228d0567c35c7a8ca6",
+    "host": "nid010412",
+    "platform": "aarch64",
+    "python": "3.12.11",
+    "report": "docs/evidence/injection_report_20260906.json",
+    "utc": "2026-09-06T02:14:27Z"
+  },
+  "sources": {
+    "run/base_model/runtime/inference.py": "9844a0dea650a5a904da60098ee8fd736b046a46914a1d617f5748fbe61f4cfe",
+    "src/base_model/inference/generate.py": "e040719a9bf7d81d26f80c098b89729651dc65968aa7ccf7d7f4b9cc2286c2aa",
+    "src/lobpipeline/injection_verification.py": "34356f5117dd961e87bb75666610978530526e67716829a8969c7d0c6702a043",
+    "tools/diagnostics/verify_injection.py": "4a46791d580a42afd950e15616d1d31b1912e99fd0cbff4ed08fd05be06a338d"
+  },
+  "what": "do(Q) injection mechanics verified: the injected order, and nothing else, lands in the book at the flagged step (J4); byte-identity comparisons recorded as node-bound diagnostics only"
+}

@@ -1,0 +1,440 @@
+{
+ "schema_version": 1,
+ "subject": "record -> replay fidelity of the generated market simulator",
+ "identity": "b_k == Pi_L( E_theta( iota_theta(b_0), m_1..m_k ) )",
+ "classes": {
+  "R": "Record: the message or book written differs from the one applied or reached",
+  "I": "Init: iota_theta(b_0) is not isomorphic to the generator's initial internal state, order identity included",
+  "T": "Transition: the two sides do not run the same engine configuration theta",
+  "O": "Observation: Pi_L cannot distinguish the states being compared. A bound, not a bug",
+  "X": "Execution: the record was not produced by the code it claims. Meta-class",
+  "V": "Validation: the diagnostic cannot detect a violation of R/I/T/O. Meta-class"
+ },
+ "statuses": [
+  "OPEN",
+  "FIXED",
+  "BOUND",
+  "REFUTED"
+ ],
+ "defects": [
+  {
+   "id": "D-X1",
+   "class": "X",
+   "statement": "srun resolves its command through PATH without testing the execute bit, unlike the shell, so a non-executable file of the same name shadows the real binary; the repository itself contained two such call sites, `srun ... env VAR=... bash script` and `srun ... bash -c`",
+   "sites": [
+    "$HOME/.local/bin/env",
+    "run/environment/run_episodes_multinode.sh:117"
+   ],
+   "trigger": "the srun command line begins with `env` and ~/.local/bin precedes /usr/bin on PATH",
+   "observable": "sacct shows JobName=env, ExitCode=13:0, Elapsed~2s",
+   "silent": false,
+   "evidence": "measured: step 5836919.420, execve(): /projects/public/u6gb/.local/bin/env: Permission denied. FIXED: run/environment/preflight.sh detects a non-executable or directory first-match in 0.1s before the allocation is spent; run/environment/attach_run.sh never passes a bare command name as srun's first word. Pinned by tests/unit/test_launcher_provenance.py. A second, in-repo site was found only after the regression test was written, which is the point of writing it",
+   "status": "FIXED"
+  },
+  {
+   "id": "D-X2",
+   "class": "X",
+   "statement": "WORKDIR defaults to a stale worktree, making new-data-from-old-code the default path",
+   "sites": [
+    "run/environment/build_episodes.sbatch:34",
+    "run/environment/run_episodes_multinode.sh:28"
+   ],
+   "trigger": "submitting without an explicit WORKDIR override",
+   "observable": "output directory timestamp is later than the commit time of the code that produced it",
+   "silent": true,
+   "evidence": "already fired: tasks/agentic_mm_20260731T164839Z generated 07-31 16:48, after the fixes were committed 09:39-11:00, from a worktree cut before them. FIXED: WORKDIR is now required with :? in both launchers, and the manifest records workdir, git_sha and git_dirty_src_run so an artifact can name its own commit",
+   "status": "FIXED"
+  },
+  {
+   "id": "D-X3",
+   "class": "X",
+   "statement": "the sbatch output path and log directory are hardcoded to the old worktree and do not follow a WORKDIR override",
+   "sites": [
+    "run/environment/build_episodes.sbatch:30",
+    "run/environment/preflight_claude_p.sbatch:23",
+    "run/environment/preflight_claude_p.sbatch:27"
+   ],
+   "trigger": "any submission that overrides WORKDIR",
+   "observable": "run log and produced data live in different worktrees",
+   "silent": true,
+   "evidence": "static: 4 hardcoded occurrences. FIXED: every #SBATCH --output and every LOG_DIR now points at the neutral job-id-keyed root /lus/lfs1aip2/projects/public/u6gb/slurm_logs, so log, per-rank logs and manifest join on the job id",
+   "status": "FIXED"
+  },
+  {
+   "id": "D-X4",
+   "class": "X",
+   "statement": "a tmux session started from inside an srun step is killed together with that step",
+   "sites": [
+    "launch procedure"
+   ],
+   "trigger": "using tmux to background work inside an allocation",
+   "observable": "process disappears within ~13s, log stops at the startup stage",
+   "silent": true,
+   "evidence": "already fired in a previous round. FIXED: run/environment/attach_run.sh makes the payload script the srun step itself, removing the intermediate process that was being reaped",
+   "status": "FIXED"
+  },
+  {
+   "id": "D-X5",
+   "class": "X",
+   "statement": "the monitor greps only for DONE and error strings; a killed process writes neither",
+   "sites": [
+    "monitor procedure"
+   ],
+   "trigger": "the monitored process is signal-killed or fails execve",
+   "observable": "log file mtime stalls while the progress count stays constant",
+   "silent": true,
+   "evidence": "already fired: one hour reporting 1/9 without alarming. FIXED: run/environment/watch_log.sh alarms on mtime and size stalling, verified on all three outcomes (stall rc=1, error rc=2, done rc=0)",
+   "status": "FIXED"
+  },
+  {
+   "id": "D-X6",
+   "class": "X",
+   "statement": "no preflight: an allocation is consumed before the run environment is verified usable",
+   "sites": [
+    "missing"
+   ],
+   "trigger": "every submission",
+   "observable": "the first step exits non-zero within 5 seconds",
+   "silent": false,
+   "evidence": "D-X1 would have been caught by a one-second probe. FIXED: build_episodes.sbatch sources preflight.sh and calls preflight_or_die before module load and before any Python, pinned by an ordering assertion",
+   "status": "FIXED"
+  },
+  {
+   "id": "D-X7",
+   "class": "X",
+   "statement": "generation is reproducible only on the node that produced it, and the record did not name the node, so the artifact was not determined by the configuration it records",
+   "sites": [
+    "run/base_model/runtime/inference.py",
+    "src/base_model/inference/generate.py"
+   ],
+   "trigger": "regenerating any window, at least across different compute nodes",
+   "observable": "byte-compare the generated message CSVs of two runs with identical seed, checkpoint, window AND node; and whether the manifest names the node at all",
+   "silent": true,
+   "evidence": "measured 2026-08-01 by comparing tasks/agentic_mm_20260801T141849Z against tasks/agentic_mm_20260801T144426Z. The conditioning streams are BYTE-IDENTICAL, so window selection is stable and the difference is purely on the generation side. All 8 generated streams differ, first at rows 7 to 118 and then in 87-99% of the remaining rows. The two runs used the same seed, checkpoint and code and differed only in the node they ran on, nid010147 against nid010148. The late first difference argues against an unseeded RNG, which would differ at row 1, and for floating-point drift flipping a sampling decision and then being amplified autoregressively. CAUSE ESTABLISHED by that experiment: two runs pinned to the SAME node (nid010148, GPU gate verified idle before each) produce output that is BYTE-IDENTICAL in 8 of 8 windows over 7200 messages. So generation is deterministic within a node, and the cross-node difference is floating-point behaviour flipping a sampling decision which autoregression then amplifies. The RNG is not implicated. FIXED by completing the record: the manifest now writes the node, because a configuration that determines the output has to be recorded like any other. The frozen-market design is unaffected, since a market is frozen by being written to disk and every policy replays that same record. n=1 pair on one node; strong (7200 messages byte-identical) but measured rather than proven in general. This does NOT affect any fidelity measurement, because fidelity compares a record against a replay of that same record; it does affect any baseline derived from regenerated data, which is how it was found: the lookup-miss sentinel count moved 355 -> 588 between two runs that should have been identical",
+   "status": "FIXED"
+  },
+  {
+   "id": "D-I1",
+   "class": "I",
+   "statement": "the generator initialises from a 500-level wide book while the replay initialises from a 10-level conditioning book. init_msgs_from_l2 maps L2 row j to the same physical (side, level) at any width, so ids within [-21,-2] name the same order on both sides; the defect bites only for ids beyond the replay's depth, oid < -21",
+   "sites": [
+    "src/base_model/inference/generate.py:1709-1715",
+    "src/post_training/heuristic_learning/fidelity.py:211-213",
+    "src/post_training/heuristic_learning/fidelity.py:162"
+   ],
+   "trigger": "a cancel or delete referencing an init order below the replay's level count",
+   "observable": "count of recorded messages with oid < -(2 + 2*n_levels), and their step positions relative to the first divergence step",
+   "silent": true,
+   "evidence": "measured, and it narrowed the claim. Out-of-depth ids occur in 1 of 8 windows (#258: 185 of 192 init-id references, 96%, deepest L2 index 84 = level 43); the other 7 windows carry only in-depth ids. #258 has by far the largest divergence magnitude (mean 28.55 ticks vs 0.30-2.80 elsewhere). But it does NOT initiate divergence: 4 of 8 windows have zero bad ids before their first divergence step, and #258's first out-of-depth id is at step 57 while divergence starts at step 200. D-I1 amplifies, it does not cause. Onset lies in class R or O. On regenerated data 2026-08-01 the out-of-depth count collapses from 185 to 19 across all 8 windows and #258 goes from 185 to 0, so most out-of-depth references were an artefact of the fuzzy lookup rather than of initialisation width. #258's gen fidelity rose 0.2389 -> 0.9044 accordingly. REFUTED as a distinct defect: measured 2026-08-01 on tasks/agentic_mm_20260801T132010Z, regenerated with faithful initialisation. with faithful initialisation the out-of-depth references resolve correctly because the orders they name now exist. It was a symptom of D-I3, not a defect of its own",
+   "status": "REFUTED"
+  },
+  {
+   "id": "D-I2",
+   "class": "I",
+   "statement": "init order ids encode the L2 vector index (id = init_id - index), so order identity is stable only across snapshots of identical width and level ordering, and the record declares no width",
+   "sites": [
+    "src/matching_engine/jaxob/JaxOrderBookArrays.py:1069"
+   ],
+   "trigger": "any replay at a width other than the generating width",
+   "observable": "the record carries no wide_levels or book_depth field",
+   "silent": true,
+   "evidence": "static: manifest.json records only checkpoints and seeds. FIXED twice over: the bookinit CSV's own column count declares the width (2 + 4*wide_levels), and the manifest declares wide_levels explicitly. The width is no longer a hidden parameter a reader has to know",
+   "status": "FIXED"
+  },
+  {
+   "id": "D-I3",
+   "class": "I",
+   "statement": "iota_L reconstructs only the top L levels of the book, so everything below level L is absent from the replay's internal state; once the visible levels deplete, the reference book surfaces a level the replay never had and every later comparison is against a different book",
+   "sites": [
+    "src/matching_engine/jaxob/JaxOrderBookArrays.py:1045-1073",
+    "src/post_training/heuristic_learning/fidelity.py:211-213"
+   ],
+   "trigger": "any replay long enough for the top L levels to deplete, which is every 900-message window measured",
+   "observable": "the first-divergence price lies outside the initial visible range; and the first-divergence step rises monotonically as the comparison window is narrowed, because a narrower window stays inside what the replay does know",
+   "silent": true,
+   "evidence": "measured 2026-08-01 by autopsy.py. 11 of 16 first-divergence prices lie outside the initial visible range, and on the real arm it is 8 of 8. Narrowing the comparison from 9 levels to 3 moves the real arm's median onset 106 -> 346 -> 588 -> 900, and comparing only the touch leaves 5 of 8 real windows with zero divergence across all 900 messages. Fixable rather than a bound: the L500 wide book exists at recon_2026-05 and the generator already initialises from it. CODE FIXED, verification pending: generation now writes data_cond/{stock}_{date}_bookinit_real_id_{i}.csv, one row of time_s, time_ns and 4*wide_levels book columns, and replay_stream gained a faithful mode mirroring get_sim exactly (reset on that book with ns zeroed, replay the conditioning messages, book_depth and nOrders from the input width). Backward compatible: runs without the file take the degraded path and reproduce their previous numbers bit for bit. The falsifiable prediction is that the real arm moves from 5/8 towards 8/8; a regeneration is running to test it. measured 2026-08-01 on tasks/agentic_mm_20260801T132010Z, regenerated with faithful initialisation. Both arms go to 8/8 exact on BOTH criteria, mid and full book, mean 1.0000, zero divergence over 900 messages in all 8 windows. Prediction was real arm 5/8 -> close to 8/8; the actual result also took the gen arm from 0/8 to 8/8. Validated by negative control: perturbing all quantities gives first divergence at step 0, deleting message 50 gives step 50, perturbing from message 300 gives step 306, and the same data through the degraded path still reports 0.3300. A criterion that reports 1.0000 everywhere has to be shown capable of reporting less",
+   "status": "FIXED"
+  },
+  {
+   "id": "D-R1",
+   "class": "R",
+   "statement": "the NaN branch feeds construct_dummy_sim_msg() to the generator's own sim but still returns the original msg_decoded for writing, so the record contains messages the generator never applied",
+   "sites": [
+    "src/base_model/inference/generate.py:510-515"
+   ],
+   "trigger": "the generated new-part contains NaN",
+   "observable": "messages present in the record that the generator did not apply; replay executes them",
+   "silent": false,
+   "evidence": "static; firing count unmeasured because the record carries no provenance flag, see D-R5. measured 2026-08-01 on tasks/agentic_mm_20260801T132010Z, regenerated with faithful initialisation. does not fire in these 8 windows: a message recorded but not applied would divergence the replay, and there is zero divergence across 7200 messages. MEASURED for the first time, 0 of 7200: the NaN branch does not fire on this data at all, which confirms by direct measurement what perfect fidelity had only implied. Still OPEN because the code still records the original message when it does fire, so the statement remains true. But it is no longer SILENT: provenance bit 2 records the branch, so an occurrence is now detectable from the artifact instead of invisible. That is a change in the defect's character, not a fix, and the field says so",
+   "status": "OPEN"
+  },
+  {
+   "id": "D-R2",
+   "class": "R",
+   "statement": "NEGATIVE_RETURN_ID = -99, the total-lookup-miss sentinel, is written into the CSV as if it were a valid order id",
+   "sites": [
+    "src/base_model/inference/generate.py:481-493",
+    "src/base_model/inference/generate.py:507",
+    "src/matching_engine/jaxob/jaxob_constants.py:10"
+   ],
+   "trigger": "both the L1 and L2 lookups miss",
+   "observable": "count of recorded messages with oid == -99",
+   "silent": true,
+   "evidence": "measured: 15 in window #258, 6 in #1386, 0 in the other six on the pre-fix generator. On the regenerated data the count is 527 across all 8 windows (7.3% of messages), because exact-timestamp lookup turns former false resolutions into honest misses. The misses are correct; writing them out as if they were order ids is not. See D-R6 for what the value then does. measured 2026-08-01 on tasks/agentic_mm_20260801T132010Z, regenerated with faithful initialisation. NOT a fidelity defect: #258 carries 544 sentinels and still replays 8/8 exact on the full book, because the sentinel is applied identically on both sides. What remains is a semantic defect, the generator removing quantity from an unrelated bid level, which this register's subject (record -> replay fidelity) does not measure. Fidelity 1.0 means the replay reproduces what the generator did, including its mistakes. FIXED as far as its consequence goes: the sentinel is still written into the record, but it is no longer a valid order id at any depth, so it resolves to the price fallback rather than to an unrelated order. The record remains odd for a human reader, which is D-R5's territory",
+   "status": "FIXED"
+  },
+  {
+   "id": "D-R3",
+   "class": "R",
+   "statement": "the written price is the model's p_abs while the written oid comes from the lookup, and the two are never cross-checked to name the same order",
+   "sites": [
+    "src/base_model/inference/generate.py:506-507",
+    "src/base_model/inference/generate.py:465"
+   ],
+   "trigger": "the resolved order sits at a price other than p_abs",
+   "observable": "count of recorded messages whose price differs from the price of their oid in the book",
+   "silent": true,
+   "evidence": "measured 2026-08-01 and now the dominant gen-arm cause. All 5 gen divergences whose price lies INSIDE the initial visible range share one signature: the recorded message price is not the price at which the generator actually removed quantity. #133 8989700 vs 8989600, #258 9317800 vs 9318900, #1478 9499600 vs 9499800, #3216 9306700 vs 9305900, #3751 9286200 vs 9286100. That is 5 of 5, discrepancies of 1 to 11 ticks. It is depth-invariant: #3751 diverges at step 4 for every comparison width from 9 levels down to 1, so no amount of initialisation depth removes it. The two autopsy signatures APPLIED_NOT_RECORDED and DIFFERENT_PRICE are one defect, differing only in whether the replay's price fallback happened to remove something or nothing. REFUTED as a fidelity defect, and this overturns the section 5.5 attribution. get_sim_msg writes the SAME (price, oid) pair into the simulator message and into the CSV, and cancel_order resolves by oid alone, so generator and replay apply an identical message to an identical book and reach an identical result. The apparent 'recorded price is not where quantity was removed' was the engine doing what it does with an oid that lives at another price, and it is reproducible. It looked like a record defect only because the replay's book was different. measured 2026-08-01 on tasks/agentic_mm_20260801T132010Z, regenerated with faithful initialisation. gen arm 8/8 exact on the full book. The record remains internally odd for a human reader, which is a separate concern from replayability",
+   "status": "REFUTED"
+  },
+  {
+   "id": "D-R4",
+   "class": "R",
+   "statement": "rel_price_ref and quantity_ref are decoded and never used, so the model's own reference-price prediction is discarded instead of validating or driving the lookup",
+   "sites": [
+    "src/base_model/inference/generate.py:447-448"
+   ],
+   "trigger": "every cancel or delete",
+   "observable": "count of cancel/delete messages where price != price_ref, recorded as provenance bit 3. Retained as a datum; it is NOT a defect count, see the evidence",
+   "silent": true,
+   "evidence": "static: both appear only in their assignment lines and in one commented-out block. FIXED as stated: the variables are no longer discarded, they feed a recorded consistency check (provenance bit 3). Deliberately a check and not an input, because making the lookup follow the ref price would change the generated market and needs its own evidence. FIRST MEASUREMENT: it fires on 1968 of 7200 messages, which is 60.1% of the 3275 cancel/delete messages. INTERPRETATION IS OPEN and deliberately not claimed: this repository does not contain the preprocessing that builds price_ref, so it could not be confirmed that price and price_ref are relativised against the same mid. A high rate therefore means either the model emits inconsistent pairs or the two fields are not comparable in this formulation. The control that settles it is to compute the same bit on the real conditioning messages, which are consistent by construction: a high rate there proves incomparability, a near-zero rate proves the model is inconsistent. That control needs its own change and has not been run. What is established is that a discarded prediction is now a recorded number. REFUTED by the control this entry itself called for. The premise was that the discarded ref fields could validate the message they accompany. They cannot, at least not by equality: running the identical check on REAL market messages, which are consistent by construction because a LOBSTER cancel's own price IS the price of the order it cancels, fires on 55.83% of them (1204/1904 = 63.24% on the conditioning stream, 1784/3448 = 51.74% on the continuation stream) against 63.35% on generated. A check that flags 56% of known-consistent data is measuring something other than consistency: price and price_ref do not share a reference frame. The 60.1% figure previously recorded here means nothing about the model. The bit is kept, because it is a real well-defined datum and deleting it would delete the evidence that the control ran, but renamed to price_differs_from_ref so its name stops asserting a refuted conclusion. Establishing what relation price_ref actually bears to price needs the preprocessing that builds it, which is not in this repository",
+   "status": "REFUTED"
+  },
+  {
+   "id": "D-R5",
+   "class": "R",
+   "statement": "the record carries no per-message provenance flag (L1 hit, L2 fallback, total miss, NaN-skipped), so D-R1 through D-R3 cannot be detected from the artifact alone",
+   "sites": [
+    "record schema",
+    "src/base_model/inference/generate.py:510-515"
+   ],
+   "trigger": "every message",
+   "observable": "the missing field itself",
+   "silent": true,
+   "evidence": "static: the CSV has six columns time,type,oid,size,price,dir. Downgraded from the critical path 2026-08-01: the onset was determined WITHOUT per-message provenance, by comparing the two book paths as price->quantity maps at the divergence step. Provenance flags would still separate D-R1 from D-R3 by construction rather than by inference, but they are no longer blocking. FIXED: get_sim_msg returns a provenance bit field, threaded out through both scan paths and written to data_gen/{stock}_{date}_provenance_real_id_{i}_gen_id_0.csv. Bits 0-1 record the resolution, bit 2 the NaN branch, bit 3 a ref-price disagreement. A sidecar rather than a seventh column so existing readers keep working. Measured over 7200 generated messages: 3925 not cancels, 2854 exact-timestamp hits, 66 price fallbacks, 355 total misses, i.e. 10.8% of the 3275 cancel/delete messages resolve to nothing",
+   "status": "FIXED"
+  },
+  {
+   "id": "D-R6",
+   "class": "R",
+   "statement": "the lookup-miss sentinel NEGATIVE_RETURN_ID = -99 is not disjoint from the init order id space, which spans [-(2L+1), -2]; once book_depth >= 49 the sentinel names a real init order, and the generator runs at L=500",
+   "sites": [
+    "src/matching_engine/jaxob/jaxob_constants.py:10",
+    "src/matching_engine/jaxob/JaxOrderBookArrays.py:1069",
+    "src/base_model/inference/generate.py:481-493"
+   ],
+   "trigger": "a total lookup miss during generation at any book_depth >= 49",
+   "observable": "whether init_id_span(book_depth) contains NEGATIVE_RETURN_ID; and, in the generator's own book, quantity removed from L2 row 97 (an odd row, hence a bid level) on a message whose id is the miss sentinel",
+   "silent": true,
+   "evidence": "arithmetic, pinned by tests/unit/test_stream_diagnostics.py. CONFIRMED ACTIVE on regenerated data 2026-08-01: cancel_order (JaxOrderBookArrays.py:130) matches on order id ALONE, with no price constraint, so at L=500 a message carrying oid=-99 directly hits the init order at L2 row 97. Row 97 is odd, hence bid side, so only bid-side sentinels collide. Measured: 527 sentinels in 7200 messages (7.3%), of which 207 are bid-side direct hits. The exact-timestamp fix ee3807c raised gen fidelity from 0.5511 to 0.7856 while raising this exposure from 6 to 207, a 34x increase, because it converts silently-wrong resolutions into explicit misses and every miss writes the sentinel. measured 2026-08-01 on tasks/agentic_mm_20260801T132010Z, regenerated with faithful initialisation. NOT a fidelity defect: #258 carries 544 sentinels and still replays 8/8 exact on the full book, because the sentinel is applied identically on both sides. What remains is a semantic defect, the generator removing quantity from an unrelated bid level, which this register's subject (record -> replay fidelity) does not measure. Fidelity 1.0 means the replay reproduces what the generator did, including its mistakes. FIXED: NEGATIVE_RETURN_ID moves from -99 to -999,999,999, far outside any plausible init id range, so a failed lookup now falls through to the engine's price-based fallback, which is the intended behaviour, instead of cancelling a real order by id. JAXLOB_Configuration.__post_init__ refuses to construct when book_depth would make the init range reach the sentinel, so a future depth cannot recreate the class quietly. The diagnostic recognises the legacy -99 as well, because a constant that reaches persisted records is part of the file format and older records still carry it",
+   "status": "FIXED"
+  },
+  {
+   "id": "D-T1",
+   "class": "T",
+   "statement": "the replay constructs JAXLOB_Configuration with defaults instead of reading theta from the generation manifest",
+   "sites": [
+    "src/post_training/heuristic_learning/fidelity.py:162"
+   ],
+   "trigger": "any generator-side configuration differing from the defaults",
+   "observable": "field-by-field comparison of the two thetas",
+   "silent": true,
+   "evidence": "measured: generator runs book_depth=500 nOrders=1050; defaults are book_depth=10 (jaxob_config.py:16) and nOrders=NORDER_CAP (jaxob_config.py:21). FIXED on the replay side: load_theta() reads what the run declares and window_report merges it under any caller override. book_depth and nOrders are excluded on purpose because faithful initialisation derives them from the width of the initialisation book, which is better than a manifest field: the data describes itself and cannot contradict itself. The generation half is D-T3",
+   "status": "FIXED"
+  },
+  {
+   "id": "D-T2",
+   "class": "T",
+   "statement": "which ids count as init orders is gated by book_depth, so the price-fallback path behaves differently at different depths given the same book",
+   "sites": [
+    "src/matching_engine/jaxob/JaxOrderBookArrays.py:1088"
+   ],
+   "trigger": "book_depth differs between the two sides",
+   "observable": "the same cancel takes different branches under two book_depth values",
+   "silent": true,
+   "evidence": "static. FIXED as a consequence of D-T1 and D-T3 together: book_depth is now declared by the record and derived from the initialisation width by the replay, so the two sides gate init-order recognition on the same value instead of on unrelated defaults",
+   "status": "FIXED"
+  },
+  {
+   "id": "D-T3",
+   "class": "T",
+   "statement": "the generation manifest records checkpoints, seeds and window counts but not the parameters that break replay: wide_levels, book_depth, nOrders, tick_size",
+   "sites": [
+    "run/environment/build_episodes.sbatch:161-184"
+   ],
+   "trigger": "every generation run",
+   "observable": "those keys are absent from manifest.json",
+   "silent": true,
+   "evidence": "static. FIXED: the manifest now carries an engine block with wide_levels, book_depth, nOrders, tick_size and init_id. book_depth and nOrders are written as the same expressions sample_new derives them from, so the record cannot disagree with the run. wide_levels became one variable feeding the wide-book mount, the --wide_levels flag and the record, replacing three separate literal 500s. Verified end to end: the block round-trips through load_theta",
+   "status": "FIXED"
+  },
+  {
+   "id": "D-O1",
+   "class": "O",
+   "statement": "init_msgs_from_l2 collapses each price level into a single synthetic order, so within-level queue order is not recoverable from an L2 snapshot and a type=4 that partially consumes a level cannot be replayed exactly",
+   "sites": [
+    "src/matching_engine/jaxob/JaxOrderBookArrays.py:1045-1073"
+   ],
+   "trigger": "replay of any stream containing aggressive executions",
+   "observable": "first divergence lands on a type=4 and is independent of cancel semantics",
+   "silent": true,
+   "evidence": "previously credited with the real arm's residual on the strength of an indirect argument: cancel_mode x book_depth were bit-identical, so divergence never reaches the cancel fallback, and the trigger is always a type 4. That reasoning is intact but the conclusion was wrong. Direct measurement 2026-08-01 attributes the real arm's residual to D-I3 instead: 8 of 8 first-divergence prices lie outside the initial visible range, and the onset moves to never when the comparison narrows to the touch. D-O1 remains a real bound with ZERO measured instances in this data. It is kept because it is true, not because it explains anything observed",
+   "status": "BOUND"
+  },
+  {
+   "id": "D-O2",
+   "class": "O",
+   "statement": "the comparison uses mid only, so depth errors that do not move the mid are invisible",
+   "sites": [
+    "src/post_training/heuristic_learning/fidelity.py:176"
+   ],
+   "trigger": "every comparison",
+   "observable": "difference between the mid criterion and a full-depth criterion on the same pair of paths",
+   "silent": true,
+   "evidence": "FIXED: compare_paths now reports exact_full_frac and first_full_divergence_step beside the mid criterion, and the report prints both. The gap is large and was invisible: on the 2026-08-01 episodes the real arm is mid 5/8 exact mean 0.9614 but full-book 0/8 exact mean 0.4058, and the gen arm is mid mean 0.7856 against full-book mean 0.0326. Even #258, exact on mid, is 0.9778 on the full book. Pinned by tests/unit/test_faithful_init.py, which asserts the full criterion is strictly stronger",
+   "status": "FIXED"
+  },
+  {
+   "id": "D-V1",
+   "class": "V",
+   "statement": "the refuted-hypothesis table records nOrders 100 vs 1050 bit-identical as ruling out capacity, but the experiment was mis-specified: varying nOrders without varying the init snapshot width and book_depth leaves the replay building 20 init orders either way",
+   "sites": [
+    "src/post_training/heuristic_learning/fidelity.py:40"
+   ],
+   "trigger": "reading the table and using it to rule out D-I1",
+   "observable": "whether the experiment also varied the init_book width",
+   "silent": true,
+   "evidence": "the negative result is real but carries zero information about D-I1. FIXED: the refuted-hypothesis table now carries the correction beside the verdict rather than deleting the entry, so the experiment can be judged along with its conclusion",
+   "status": "FIXED"
+  },
+  {
+   "id": "D-V2",
+   "class": "V",
+   "statement": "the documentation attributes the residual to lost within-level queue order, which holds for the real arm but not for the gen arm, where D-I1 dominates",
+   "sites": [
+    "src/post_training/heuristic_learning/fidelity.py:51"
+   ],
+   "trigger": "reading the documentation",
+   "observable": "whether both arms' residuals are explained by a single mechanism",
+   "silent": true,
+   "evidence": "the natural experiment in docs/fidelity_defect_taxonomy.md section 5. FIXED: the queue-order bound is now stated as explaining the real arm only; the gen arm's onset is recorded as unlocated",
+   "status": "FIXED"
+  },
+  {
+   "id": "D-V3",
+   "class": "V",
+   "statement": "n_unresolvable_ids conflates two phenomena of opposite significance: benign cancels of orders created before the conditioning window, and fatal cancels naming an init order absent at this replay depth",
+   "sites": [
+    "src/post_training/heuristic_learning/fidelity.py:143"
+   ],
+   "trigger": "every report",
+   "observable": "split the count three ways by oid >= 0, oid == -99, and oid inside the init range",
+   "silent": true,
+   "evidence": "measured: the 207 unresolvable ids in gen window #258 are exactly its 207 negative ids. FIXED: describe_stream splits the count into n_unresolved_positive / n_lookup_miss_sentinel / n_init_ref_in_depth / n_init_ref_out_of_depth, and records first_bad_id_step so onset can be separated from magnitude. Measured on the 8 windows: the real arm is 100% benign positive ids, out-of-depth references occur only in #258, and 4 of 8 gen windows show onset=NO",
+   "status": "FIXED"
+  },
+  {
+   "id": "D-V4",
+   "class": "V",
+   "statement": "the integration test welds its baseline to a timestamped absolute path produced by a stale worktree",
+   "sites": [
+    "tests/integration/test_simulator_fidelity.py:27"
+   ],
+   "trigger": "after data is regenerated",
+   "observable": "the directory the test references is not the current output directory",
+   "silent": false,
+   "evidence": "static. FIXED: RUN_DIR now reads SIGMA_EPISODES_DIR with the newest measured set as default, so re-running generation does not orphan the baseline",
+   "status": "FIXED"
+  },
+  {
+   "id": "D-V5",
+   "class": "V",
+   "statement": "EXPECTED_GEN_MEAN_MIN = 0.40 freezes a measurement now believed to be dominated by a fixable defect into an acceptance expectation",
+   "sites": [
+    "tests/integration/test_simulator_fidelity.py:39"
+   ],
+   "trigger": "every test run",
+   "observable": "whether the threshold's provenance is a post-fix measurement",
+   "silent": false,
+   "evidence": "static. FIXED: the floor is re-derived from the fixed generator (mean 0.7856, floor 0.70) and now carries its provenance in the comment, including that D-R6 is still open on this very data. A regression detector with a stated origin, not an acceptance bar with a forgotten one",
+   "status": "FIXED"
+  },
+  {
+   "id": "D-T4",
+   "class": "T",
+   "statement": "the training forward honoured use_positional_encoding while prefill and __call_inference__ did not, so a NoPE-trained hybrid generated with a sinusoid injected into every query and key; training loss and held-out CE stay clean because they use the training path, so only generated sequences are wrong",
+   "sites": [
+    "src/base_model/models/transformer.py:225-229",
+    "tests/unit/test_transformer_decode_parity.py:1"
+   ],
+   "trigger": "a model trained with use_positional_encoding=False generates through the KV-cache decode path",
+   "observable": "run the training forward and prefill+step decode over identical inputs and compare outputs (test_transformer_decode_parity.py); the mismatch cost about 11 points of reference recall at 32,000 steps before the fix",
+   "silent": true,
+   "evidence": "measured: fixed in facf656d together with the parity test; found during the 2026-08-12 500-to-2k work, where it read at first like an architectural result",
+   "status": "FIXED"
+  },
+  {
+   "id": "D-T5",
+   "class": "T",
+   "statement": "the hybrid's attention positions received a KV cache sized by the 26,000-token default rather than by the requested conditioning-plus-generation window, so any request past 500+500 messages attended over a silently truncated history",
+   "sites": [
+    "src/base_model/models/transformer.py:129",
+    "src/base_model/models/transformer.py:239-240"
+   ],
+   "trigger": "conditioning plus generation exceeding 26,000 tokens, i.e. any window past 500+500 messages",
+   "observable": "cache arrays allocated with a length axis shorter than seq_len_cond + n_gen_msgs*msg_len; after the fix the length is derived from the request (attention_max_cache_len threads through the registry)",
+   "silent": true,
+   "evidence": "measured: found and fixed in 32e09d34 during the 2026-08-12 500-to-2k extrapolation; it was a real defect on the generation path but not the cause of that run's recall collapse, which the demoted profiling write-up records",
+   "status": "FIXED"
+  },
+  {
+   "id": "D-X8",
+   "class": "X",
+   "statement": "grad_norms_or_logits was assigned on the scan and plain train paths but never on the gradient-accumulation path, so GRAD_ACCUM_STEPS>1 together with LOG_GRAD_NORMS=1 raised UnboundLocalError at the first optimizer step",
+   "sites": [
+    "src/base_model/training/train_helpers.py:1083"
+   ],
+   "trigger": "GRAD_ACCUM_STEPS>1 together with LOG_GRAD_NORMS=1",
+   "observable": "UnboundLocalError naming grad_norms_or_logits at the first K-micro-batch boundary; the run dies before its first optimizer step completes",
+   "silent": false,
+   "evidence": "measured: the diagnostic run of 2026-08-13 00:58 died exactly this way -- the run that needed gradient norms most; fixed in 35a88ad by computing norms from accum_grads at the apply boundary, with an explicit None initialisation so an unassigned path costs one metric rather than the run",
+   "status": "FIXED"
+  },
+  {
+   "id": "D-X9",
+   "class": "X",
+   "statement": "the checkpoint reshard broadcast (device_get -> broadcast_one_to_all -> device_put) builds a pure inter-node NCCL clique that the training path never constructs -- replica_groups [4,4]<=[4,4]T(1,0), one card per node, 100% Slingshot -- while its own comment claims the round trip exists to avoid exactly that",
+   "sites": [
+    "src/base_model/training/train.py:321"
+   ],
+   "trigger": "any multi-host checkpoint save on the broadcast path, at every save interval",
+   "observable": "the hang lands on the save-period boundary: main thread in futex_wait, exactly one CUDA spin thread per GPU, zero orbax file descriptors (stalled before opening files); compile-time, check_replica_groups.py shows the broadcast psum shares zero replica_groups with training",
+   "silent": true,
+   "evidence": "measured: two hangs on 2026-08-13 at 10:36:26 and 12:36:27, both within +-30s of the 900s save boundary (about 0.4% chance if uniform); the compile-time replica-group analysis is reproducible on a login node. The fix (CKPT_RESHARD_MODE with a collectively agreed downgrade) ships in its own PR carrying a real multi-host save-and-resume round trip; OPEN until that lands",
+   "status": "OPEN"
+  },
+  {
+   "id": "D-X10",
+   "class": "X",
+   "statement": "create_jit_train_step builds the gradient-accumulation pair only on the shard_map path, so grad_accum_steps>1 on a flat single-node mesh fell through to the plain per-micro-batch path and K was silently ignored: every micro-batch applied immediately, the effective batch was micro_bsz*n_devices instead of the declared one, and the LR schedule advanced per micro-batch",
+   "sites": [
+    "src/base_model/training/train_helpers.py:1821"
+   ],
+   "trigger": "GRAD_ACCUM_STEPS>1 on a topology where use_shard_map is false (single node, no 'tp' axis)",
+   "observable": "before the fix, nothing at launch: the banner printed the declared K and effective batch while checkpoint labels advanced at micro-batch rate (state.step spacing equal to micro-batches per save interval, 1800 per 900 s at 2.0 micro-steps/s, where the accumulation path would show 90); after the fix, ValueError from create_jit_train_step naming grad_accum_steps",
+   "silent": true,
+   "evidence": "measured: the 2026-08-27 single-node baseline segment (banner 'K=20 (effective BSZ = 80)') saved checkpoints at state.step 346, 2153, 3952, 5749, 7547 -- 1800 apart per 900 s auto-save at 2.0 micro-steps/s, i.e. one state.step per micro-batch, effective batch 4; the 1.8 h segment was discarded (checkpoints renamed *_deprecated_bsz4) and the guard added with a unit detector",
+   "status": "FIXED"
+  }
+ ]
+}

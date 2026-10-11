@@ -1,0 +1,124 @@
+{
+  "assertions": [
+    {
+      "metric": "invariants.noop_pnl",
+      "name": "a policy that never quotes earns exactly zero",
+      "op": "==",
+      "value": 0.0,
+      "why": "non-zero means someone else's fills are being credited to us, which no downstream averaging would reveal"
+    },
+    {
+      "metric": "invariants.noop_fills",
+      "name": "a policy that never quotes gets no fills",
+      "op": "==",
+      "value": 0
+    },
+    {
+      "metric": "invariants.conservation_gap",
+      "name": "inventory equals the signed sum of fills",
+      "op": "==",
+      "value": 0,
+      "why": "inventory must not be tracked independently of the fills"
+    },
+    {
+      "metric": "invariants.deterministic",
+      "name": "two identical runs agree",
+      "op": "==",
+      "value": 1,
+      "why": "without determinism a paired comparison between policies is meaningless"
+    },
+    {
+      "metric": "fidelity.real_exact",
+      "name": "real-arm fidelity does not regress",
+      "op": ">=",
+      "value": 8,
+      "why": "replaying real messages must keep reproducing the recorded real book"
+    },
+    {
+      "metric": "inputs_digest_recorded",
+      "name": "inputs are the declared baseline",
+      "op": "==",
+      "value": 1,
+      "why": "set at record time after checking the episode data against the previously recorded fingerprint; CI cannot re-check it because the data is not in the repository"
+    },
+    {
+      "metric": "fidelity.real_mean",
+      "name": "real arm beats the gen arm",
+      "op": ">=",
+      "value": 1.0,
+      "why": "the asymmetry is what shows the engine is not the source of divergence"
+    },
+    {
+      "metric": "fidelity.real_full_exact",
+      "name": "the real arm reproduces the whole book, not just the touch",
+      "op": ">=",
+      "value": 8,
+      "why": "mid only watches the touch; on this same data it read 5/8 while the full book read 0/8"
+    },
+    {
+      "metric": "fidelity.gen_full_exact",
+      "name": "the gen arm reproduces the whole book",
+      "op": ">=",
+      "value": 8,
+      "why": "the saved generated stream must reconstruct the book the generator recorded, or the market a policy is scored in is not the market that was generated"
+    },
+    {
+      "metric": "fidelity.gen_lookup_miss_sentinels",
+      "name": "the lookup-miss sentinel volume has not moved",
+      "op": "<=",
+      "value": 932,
+      "why": "invisible to every fidelity assertion, so it needs its own"
+    }
+  ],
+  "inputs": {
+    "digest": "811b44053537fb249915af396ca6153d5f2c3adf1739e00f1afea85f036d2585",
+    "months": [
+      "2026-01"
+    ],
+    "msgs_per_window": [
+      900
+    ],
+    "n_files": 48,
+    "n_windows": 8,
+    "run_dir": "/lus/lfs1aip2/projects/public/u6gb/tasks/agentic_mm_20260801T144426Z/generated/background_seed2026",
+    "stock": "GS"
+  },
+  "kind": "simulator",
+  "metrics": {
+    "fidelity": {
+      "gen_exact": 8,
+      "gen_full_exact": 8,
+      "gen_lookup_miss_sentinels": 588,
+      "gen_mean": 1.0,
+      "real_exact": 8,
+      "real_full_exact": 8,
+      "real_mean": 1.0,
+      "windows": 8
+    },
+    "inputs_digest_recorded": 1,
+    "invariants": {
+      "conservation_gap": 0,
+      "deterministic": 1,
+      "noop_fills": 0,
+      "noop_inventory": 0,
+      "noop_pnl": 0.0
+    }
+  },
+  "recorded": {
+    "branch": "ci/pipefail-per-workflow",
+    "commit": "a7fd450e62eeab57ed24c0c63d41ed9d4c25db8f",
+    "episodes": "/lus/lfs1aip2/projects/public/u6gb/tasks/agentic_mm_20260801T144426Z/generated/background_seed2026",
+    "host": "nid010367",
+    "platform": "aarch64",
+    "python": "3.13.12",
+    "utc": "2026-08-26T11:40:52Z"
+  },
+  "sources": {
+    "src/matching_engine/jaxob/JaxOrderBookArrays.py": "2690f2d74c79a65fa8722a0a84ea8bc2215d702b28959d6fde5d3b066060893d",
+    "src/matching_engine/jaxob/jorderbook.py": "526a94b687a5328c89cc8a2d6a7af6df5b7cee71cba5701f3b0829f398d06975",
+    "src/post_training/heuristic_learning/episode_builder.py": "81640b86e770ae07fb1f88186c8979deba8bacb0752c1e6f48c0bb9238df7bce",
+    "src/post_training/heuristic_learning/fidelity.py": "1929d99f4dfe84703b6aa6713a20767faed9e25b74971cd1c880ed6a7f5d0ee3",
+    "src/post_training/heuristic_learning/mm_sim.py": "ce8ec70b68e28e1a0735381d1c9edb6d99cb939c87a770dd44917fe592480ee5"
+  },
+  "what": "behavioural claims measured on the cluster against real market data"
+}

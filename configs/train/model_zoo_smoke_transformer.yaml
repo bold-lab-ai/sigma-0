@@ -1,0 +1,8 @@
+include: model_zoo_smoke_base.yaml
+name: model_zoo_smoke_transformer
+architecture: transformer
+sbatch_job_name: sigma0-smoke-transformer
+env_ARCHITECTURE: transformer
+env_N_HEADS: 4
+env_D_FF: 128
+env_ATTENTION_MAX_CACHE_LEN: 416

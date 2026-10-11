@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "shard": "sigma0-selftrain/b43",
+  "n_files": 2,
+  "shapes": {
+    "b43/GOOG_2022-12-30_34200000_57600000_message_10_proc.npy": {
+      "shape": [
+        1887824,
+        14
+      ],
+      "dtype": "int64"
+    },
+    "b43/GOOG_2022-12-30_34200000_57600000_orderbook_10_proc.npy": {
+      "shape": [
+        1887825,
+        43
+      ],
+      "dtype": "int64"
+    }
+  }
+}

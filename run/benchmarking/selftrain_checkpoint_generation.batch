@@ -1,0 +1,338 @@
+#!/bin/bash
+# Generate the frozen January-2026 pool from one exact self-train checkpoint.
+# Four independent single-GPU processes use interleaved canonical indices.
+#SBATCH --job-name=sigma0-st-lobgen
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:4
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=0
+#SBATCH --time=11:30:00
+
+set -euo pipefail
+
+: "${LAUNCHER_WORKDIR:?LAUNCHER_WORKDIR is required}"
+: "${RUNTIME_WORKDIR:?RUNTIME_WORKDIR is required}"
+: "${EXPECTED_RUNTIME_COMMIT:?EXPECTED_RUNTIME_COMMIT is required}"
+: "${CHECKPOINT_PATH:?CHECKPOINT_PATH is required}"
+: "${CHECKPOINT_STEP:?CHECKPOINT_STEP is required}"
+: "${EXPECTED_CHECKPOINT_METADATA_SHA256:?EXPECTED_CHECKPOINT_METADATA_SHA256 is required}"
+: "${TASK_ROOT:?TASK_ROOT is required}"
+: "${SAMPLE_INDICES_FILE:?SAMPLE_INDICES_FILE is required}"
+: "${EXPECTED_SAMPLE_INDICES_SHA256:?EXPECTED_SAMPLE_INDICES_SHA256 is required}"
+: "${EXPECTED_DATASET_LENGTH:?EXPECTED_DATASET_LENGTH is required}"
+
+QUANT_ROOT="${QUANT_ROOT:-/lus/lfs1aip2/projects/public/s5e/quant_team/quant}"
+BENCHMARK_ROOT="${LOBBENCH_ROOT:-$QUANT_ROOT/AlphaTrade/lob_pipeline}"
+PYTHON="${PYTHON:-$QUANT_ROOT/miniforge3/bin/python}"
+STATE_HELPER="$LAUNCHER_WORKDIR/run/benchmarking/update_selftrain_lobbench_state.py"
+INFERENCE_VALIDATOR="$LAUNCHER_WORKDIR/run/benchmarking/validate_selftrain_inference.py"
+OUTPUT_ROOT="$TASK_ROOT/evaluation"
+COMPLETE_MANIFEST="$OUTPUT_ROOT/generation_complete.json"
+STEP_REF="${SLURM_JOB_ID}${SLURM_STEP_ID:+.${SLURM_STEP_ID}}"
+JOB_TMP="/tmp/${USER:-${LOGNAME:-unknown}}/sigma0/${SLURM_JOB_ID}_${SLURM_STEP_ID:-batch}"
+
+# Where the 25,092 per-sequence files are written.
+#
+# With LOBBENCH_PACK=1 (the default) they are written to node-local /tmp and only
+# a single SquashFS image is copied back to Lustre. That is 2 inodes instead of
+# 25,092, and it removes the per-file metadata traffic that anti-patterns 1 and 4
+# in AGENTS.md section 7 are about. LOBBENCH_PACK=0 restores the old behaviour
+# exactly, for a run that needs the loose files on Lustre.
+LOBBENCH_PACK="${LOBBENCH_PACK:-1}"
+INFERENCE_IMAGE="$OUTPUT_ROOT/inference.sqfs"
+INFERENCE_SIDECAR="$OUTPUT_ROOT/index_inference.json"
+INFERENCE_INDEX_DIR="$OUTPUT_ROOT/inference_index"
+if [ "$LOBBENCH_PACK" = "1" ]; then
+    INFERENCE_DIR="$JOB_TMP/inference"
+else
+    INFERENCE_DIR="$OUTPUT_ROOT/inference"
+fi
+N_SEQUENCES="${LOBBENCH_N_SEQUENCES:-3136}"
+BATCH_SIZE="${INFERENCE_BATCH_SIZE:-4}"
+WORLD_SIZE=4
+N_COND_MSGS="${N_COND_MSGS:-250}"
+N_GEN_MSGS="${N_GEN_MSGS:-250}"
+
+record_state() {
+    "$PYTHON" "$STATE_HELPER" \
+        --task-root "$TASK_ROOT" \
+        --state "$1" \
+        --job-id "$STEP_REF" \
+        --action "$2" \
+        ${3:+--metric "$3"} \
+        ${4:+--alert "$4"}
+}
+
+on_error() {
+    local exit_code=$?
+    trap - ERR
+    record_state failed generation_failed "exit_code=$exit_code" \
+        "See $TASK_ROOT/slurm/generation_${SLURM_JOB_ID}.err"
+    exit "$exit_code"
+}
+trap on_error ERR
+
+record_state running generation_started
+
+CURRENT_COMMIT=$(git -c safe.directory="$RUNTIME_WORKDIR" \
+    -C "$RUNTIME_WORKDIR" rev-parse HEAD)
+if [ "$CURRENT_COMMIT" != "$EXPECTED_RUNTIME_COMMIT" ]; then
+    echo "Refusing runtime drift: expected $EXPECTED_RUNTIME_COMMIT, found $CURRENT_COMMIT" >&2
+    exit 2
+fi
+if [ "$N_COND_MSGS" -ne 250 ] || [ "$N_GEN_MSGS" -ne 250 ]; then
+    echo "Formal evaluation requires exactly 250 conditioning + 250 generated messages" >&2
+    exit 2
+fi
+if [ $((N_SEQUENCES % (WORLD_SIZE * BATCH_SIZE))) -ne 0 ]; then
+    echo "Refusing padded pool: $N_SEQUENCES is not divisible by $WORLD_SIZE x $BATCH_SIZE" >&2
+    exit 2
+fi
+
+"$PYTHON" - "$CHECKPOINT_PATH" "$CHECKPOINT_STEP" \
+    "$EXPECTED_CHECKPOINT_METADATA_SHA256" <<'PY'
+import hashlib
+import json
+import math
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+step = int(sys.argv[2])
+expected_sha = sys.argv[3]
+step_dir = root / str(step)
+required = (
+    step_dir / "_CHECKPOINT_METADATA",
+    step_dir / "metadata" / "metadata",
+    step_dir / "state" / "_METADATA",
+    step_dir / "state" / "manifest.ocdbt",
+)
+missing = [str(path) for path in required if not path.is_file()]
+if missing:
+    raise SystemExit(f"incomplete checkpoint; missing={missing}")
+steps = sorted(int(path.name) for path in root.iterdir()
+               if path.is_dir() and path.name.isdigit())
+if not steps or steps[-1] != step:
+    raise SystemExit(f"latest checkpoint is {steps[-1] if steps else None}, expected {step}")
+metadata_path = step_dir / "metadata" / "metadata"
+actual_sha = hashlib.sha256(metadata_path.read_bytes()).hexdigest()
+if actual_sha != expected_sha:
+    raise SystemExit(f"checkpoint metadata drift: expected {expected_sha}, found {actual_sha}")
+payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+config = payload.get("config", {})
+expected = {
+    "ssm_type": "mamba3",
+    "d_model": 1024,
+    "n_layers": 6,
+    "msg_seq_len": 500,
+    "book_transform": True,
+    "book_depth": 500,
+}
+mismatches = {
+    key: {"expected": value, "actual": config.get(key)}
+    for key, value in expected.items()
+    if config.get(key) != value
+}
+if mismatches:
+    raise SystemExit(f"checkpoint contract mismatch: {mismatches}")
+loss = payload.get("metrics", {}).get("loss_train")
+if not isinstance(loss, (int, float)) or not math.isfinite(loss):
+    raise SystemExit(f"checkpoint has no finite training loss: {loss}")
+print(f"[checkpoint-preflight] step={step} loss={loss:.10g} metadata_sha256={actual_sha}")
+PY
+
+CURRENT_SAMPLE_SHA=$(sha256sum "$SAMPLE_INDICES_FILE" | awk '{print $1}')
+if [ "$CURRENT_SAMPLE_SHA" != "$EXPECTED_SAMPLE_INDICES_SHA256" ]; then
+    echo "Refusing sample-index drift: expected $EXPECTED_SAMPLE_INDICES_SHA256, found $CURRENT_SAMPLE_SHA" >&2
+    exit 2
+fi
+if [ -f "$COMPLETE_MANIFEST" ]; then
+    echo "[generation] already complete: $COMPLETE_MANIFEST"
+    record_state completed generation_already_complete
+    exit 0
+fi
+if [ -d "$INFERENCE_DIR" ] && [ -n "$(find "$INFERENCE_DIR" -mindepth 1 -print -quit)" ]; then
+    echo "Refusing to mix with incomplete inference: $INFERENCE_DIR" >&2
+    exit 2
+fi
+if [ "$LOBBENCH_PACK" = "1" ]; then
+    # Resolve mksquashfs now, not after eleven hours of generation. It is not
+    # installed system-wide and there is no module for it, so it has to come
+    # from a conda prefix. Order: explicit override, PATH, the prefix that
+    # holds $PYTHON. docs/benchmarking.md records the value used on this site.
+    if [ -n "${SIGMA0_SQUASHFS_BIN:-}" ] && [ -x "$SIGMA0_SQUASHFS_BIN/mksquashfs" ]; then
+        :
+    elif command -v mksquashfs >/dev/null 2>&1; then
+        SIGMA0_SQUASHFS_BIN="$(dirname "$(command -v mksquashfs)")"
+    elif [ -x "$(dirname "$PYTHON")/mksquashfs" ]; then
+        SIGMA0_SQUASHFS_BIN="$(dirname "$PYTHON")"
+    else
+        echo "LOBBENCH_PACK=1 but mksquashfs was not found." >&2
+        echo "Set SIGMA0_SQUASHFS_BIN to a conda prefix bin/ that has it," >&2
+        echo "or set LOBBENCH_PACK=0 to write the loose files to Lustre." >&2
+        exit 2
+    fi
+    export SIGMA0_SQUASHFS_BIN
+    echo "[pack] mksquashfs=$SIGMA0_SQUASHFS_BIN/mksquashfs"
+    # 3,136 sequences produced 699 MB on the measured trees. /tmp is tmpfs and
+    # therefore comes out of node memory, so check there is room before the run
+    # rather than failing at the end with the output already generated.
+    TMP_FREE_MB="$(df -Pm /tmp | awk 'NR==2 {print $4}')"
+    if [ "${TMP_FREE_MB:-0}" -lt 4096 ]; then
+        echo "Only ${TMP_FREE_MB} MB free on /tmp; need a few GB for the packed path." >&2
+        exit 2
+    fi
+    echo "[pack] /tmp free=${TMP_FREE_MB} MB"
+fi
+# The packed path leaves an image rather than a directory, so the "do not mix"
+# check has to look for that too, otherwise a rerun would silently overwrite a
+# finished generation whose loose files are long gone.
+if [ -e "$INFERENCE_IMAGE" ]; then
+    echo "Refusing to mix with an existing image: $INFERENCE_IMAGE" >&2
+    exit 2
+fi
+if [ -d "$OUTPUT_ROOT/inference" ] && [ "$LOBBENCH_PACK" = "1" ] \
+   && [ -n "$(find "$OUTPUT_ROOT/inference" -mindepth 1 -print -quit)" ]; then
+    echo "Refusing to mix with an unpacked tree on Lustre: $OUTPUT_ROOT/inference" >&2
+    echo "Pack it first (run/benchmarking/pack_inference.py) or set LOBBENCH_PACK=0." >&2
+    exit 2
+fi
+
+mkdir -p "$INFERENCE_DIR" "$OUTPUT_ROOT" "$JOB_TMP"
+export TMPDIR="$JOB_TMP"
+export MPLCONFIGDIR="$JOB_TMP/matplotlib"
+mkdir -p "$MPLCONFIGDIR"
+
+module load cuda/12.6
+CONDA_PREFIX="$QUANT_ROOT/miniforge3"
+NVIDIA_SITE="$CONDA_PREFIX/lib/python3.12/site-packages/nvidia"
+TORCH_LIB="$CONDA_PREFIX/lib/python3.12/site-packages/torch/lib"
+export PATH="$CONDA_PREFIX/bin:$PATH"
+export LD_LIBRARY_PATH="$TORCH_LIB:$NVIDIA_SITE/cuda_nvrtc/lib:$NVIDIA_SITE/cuda_runtime/lib:$NVIDIA_SITE/cusparse/lib:$NVIDIA_SITE/cuda_cupti/lib:$NVIDIA_SITE/cufft/lib:$NVIDIA_SITE/nvjitlink/lib:$NVIDIA_SITE/cusolver/lib:$NVIDIA_SITE/nccl/lib:$NVIDIA_SITE/cublas/lib:$NVIDIA_SITE/cudnn/lib:$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+export PYTHONPATH="$RUNTIME_WORKDIR/src:$RUNTIME_WORKDIR:${PYTHONPATH:-}"
+export PYTHONNOUSERSITE=1
+export XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.90}"
+# This checkpoint was trained with the current norm implementation.
+unset MAMBA3_LEGACY_NORM || true
+"$PYTHON" -c 'import jax, torch; backend=jax.default_backend(); assert backend == "gpu", backend; print(f"[cuda-preflight] jax={backend} torch={torch.__version__}")'
+
+source "$LAUNCHER_WORKDIR/run/benchmarking/squashfs_helpers_no_delete.sh"
+infer_squashfs_setup \
+    GOOG "${INFERENCE_MONTHS:-2026-01}" \
+    "${INFERENCE_SQUASHFS_DIR:-/lus/lfs1aip2/projects/public/s5e/quant_team/lob_preproc_sp500_squashfs}"
+infer_squashfs_setup_wide_book \
+    GOOG "${INFERENCE_MONTHS:-2026-01}" \
+    "${WIDE_SQUASHFS_DIR:-/projects/public/s5e/quant_team/recon_2026-05/output/squashfs}" \
+    "${WIDE_LEVELS:-500}"
+trap infer_squashfs_cleanup EXIT
+
+echo "[generation] checkpoint=$CHECKPOINT_PATH step=$CHECKPOINT_STEP"
+echo "[generation] sequences=$N_SEQUENCES cond=$N_COND_MSGS gen=$N_GEN_MSGS batch=$BATCH_SIZE"
+echo "[generation] fixed_indices=$SAMPLE_INDICES_FILE sha256=$CURRENT_SAMPLE_SHA"
+
+PIDS=()
+for LOCAL_RANK in 0 1 2 3; do
+    RANK_TMP="$JOB_TMP/rank_$LOCAL_RANK"
+    mkdir -p "$RANK_TMP"
+    CUDA_VISIBLE_DEVICES=$LOCAL_RANK TMPDIR="$RANK_TMP" "$PYTHON" -u -B \
+        "$RUNTIME_WORKDIR/run/base_model/runtime/inference.py" \
+        --architecture=mamba3 \
+        --token_mode=26tok \
+        --ckpt_path="$CHECKPOINT_PATH" \
+        --checkpoint_step="$CHECKPOINT_STEP" \
+        --data_dir="$INFER_DATA_DIR_NODE" \
+        --wide_book_dir="$INFER_WIDE_BOOK_DIR_NODE" \
+        --wide_levels="${WIDE_LEVELS:-500}" \
+        --save_dir="$INFERENCE_DIR" \
+        --stock=GOOG \
+        --n_sequences="$N_SEQUENCES" \
+        --batch_size="$BATCH_SIZE" \
+        --n_cond_msgs="$N_COND_MSGS" \
+        --n_gen_msgs="$N_GEN_MSGS" \
+        --test_split=1.0 \
+        --sample_indices_file="$SAMPLE_INDICES_FILE" \
+        --seed="${GENERATION_SEED:-2026}" \
+        --rank="$LOCAL_RANK" --world_size="$WORLD_SIZE" \
+        > "$OUTPUT_ROOT/inference_rank${LOCAL_RANK}.log" 2>&1 &
+    PIDS+=("$!")
+done
+
+INFERENCE_EXIT=0
+for i in "${!PIDS[@]}"; do
+    if ! wait "${PIDS[$i]}"; then
+        echo "Inference rank $i failed; see $OUTPUT_ROOT/inference_rank${i}.log" >&2
+        INFERENCE_EXIT=1
+    fi
+done
+[ "$INFERENCE_EXIT" -eq 0 ] || exit "$INFERENCE_EXIT"
+
+"$PYTHON" "$INFERENCE_VALIDATOR" \
+    --runtime-validator "$RUNTIME_WORKDIR/run/benchmarking/validate_model_zoo_evaluation.py" \
+    "$INFERENCE_DIR" \
+    --expected-sequences "$N_SEQUENCES" \
+    --generated-rows "$N_GEN_MSGS" \
+    --conditioning-rows "$N_COND_MSGS" \
+    --world-size "$WORLD_SIZE" \
+    --expected-indices-file "$SAMPLE_INDICES_FILE" \
+    --expected-dataset-length "$EXPECTED_DATASET_LENGTH" \
+    > "$OUTPUT_ROOT/inference_inventory.json"
+
+if [ "$LOBBENCH_PACK" = "1" ]; then
+    # Pack the node-local tree into one image, verify every file by sha256 against
+    # the tree that produced it, and copy back only the image and its sidecar.
+    #
+    # The verify is not optional. mksquashfs has silently truncated files in this
+    # project before (see src/base_model/data/lobster_dataloader.py), and
+    # LOB-Bench reads with on_bad_lines="skip", so a truncated tail would be
+    # absorbed into a shorter DataFrame and move the score with nothing going red.
+    echo "[pack] building $INFERENCE_IMAGE from $INFERENCE_DIR"
+    PACK_TMP="$JOB_TMP/pack"
+    mkdir -p "$PACK_TMP"
+    SIGMA0_SQUASHFS_BIN="$SIGMA0_SQUASHFS_BIN" \
+    PYTHONPATH="$LAUNCHER_WORKDIR/src:${PYTHONPATH:-}" \
+    "$PYTHON" -u "$LAUNCHER_WORKDIR/run/benchmarking/pack_inference.py" \
+        --keep-source \
+        --report "$PACK_TMP/pack_report.json" \
+        "$INFERENCE_DIR"
+
+    # The sample indices say which contexts were drawn. They cannot be recovered
+    # from the scores, and they are four small files, so keep them readable on
+    # Lustre without needing a mount.
+    mkdir -p "$INFERENCE_INDEX_DIR"
+    cp -p "$INFERENCE_DIR"/sample_indices_rank*.json "$INFERENCE_INDEX_DIR/"
+
+    rsync -a "$JOB_TMP/inference.sqfs" "$INFERENCE_IMAGE"
+    rsync -a "$JOB_TMP/index_inference.json" "$INFERENCE_SIDECAR"
+    echo "[pack] image=$(stat -c%s "$INFERENCE_IMAGE") bytes on Lustre; source tree stays node-local"
+fi
+
+"$PYTHON" - "$OUTPUT_ROOT/inference_inventory.json" "$COMPLETE_MANIFEST" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+inventory = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+inventory.update({
+    "training_job_id": os.environ.get("TRAIN_JOB_ID"),
+    "wandb_url": os.environ.get("WANDB_URL"),
+    "checkpoint_path": os.environ["CHECKPOINT_PATH"],
+    "checkpoint_step": int(os.environ["CHECKPOINT_STEP"]),
+    "checkpoint_metadata_sha256": os.environ["EXPECTED_CHECKPOINT_METADATA_SHA256"],
+    "sigma0_runtime_commit": os.environ["EXPECTED_RUNTIME_COMMIT"],
+    "lobbench_revision": os.environ["EXPECTED_LOBBENCH_REVISION"],
+    "generation_job_id": os.environ["SLURM_JOB_ID"],
+    "generation_step_id": os.environ.get("SLURM_STEP_ID"),
+    "generation_seed": int(os.environ.get("GENERATION_SEED", "2026")),
+    "conditioning_messages": int(os.environ.get("N_COND_MSGS", "250")),
+    "generated_messages": int(os.environ.get("N_GEN_MSGS", "250")),
+})
+Path(sys.argv[2]).write_text(
+    json.dumps(inventory, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+PY
+
+record_state completed generation_complete "sequences=$N_SEQUENCES"
+echo "[generation] complete manifest=$COMPLETE_MANIFEST"

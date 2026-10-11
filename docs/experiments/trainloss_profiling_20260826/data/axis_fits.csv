@@ -1,0 +1,7 @@
+window,axis,alpha,alpha_at_search_bound,beta,E,n_points,n_runs,best_size_on_this_ruler
+endpoint,jan2026_macro,2.000000,True,1.408136,0.565524,33,33,23M
+endpoint,valset_macro,1.911948,False,1.726205,0.595692,33,33,120M
+endpoint,jan_shuffle_macro,1.886196,False,1.600871,0.523363,33,33,120M
+last25,jan2026_macro,2.000000,True,0.801014,0.555200,132,33,23M
+last25,valset_macro,1.922188,False,1.337441,0.595692,132,33,120M
+last25,jan_shuffle_macro,1.892724,False,1.404460,0.523363,132,33,120M

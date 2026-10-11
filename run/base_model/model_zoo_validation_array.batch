@@ -1,0 +1,67 @@
+#!/bin/bash
+# Fixed December-2025 validation CE for every architecture/seed checkpoint run.
+#SBATCH --job-name=sigma0-zoo-val-ce
+#SBATCH --array=0-17%6
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:1
+#SBATCH --mem=115000M
+#SBATCH --time=04:00:00
+#SBATCH --output=model_zoo_val_ce_%A_%a.out
+#SBATCH --error=model_zoo_val_ce_%A_%a.err
+
+set -euo pipefail
+
+ARCHITECTURES=(mamba3 s5 gdn kda transformer nsa)
+SEEDS=(5 42 137)
+TASK_ID=${SLURM_ARRAY_TASK_ID:?SLURM_ARRAY_TASK_ID is required}
+ARCH_INDEX=$((TASK_ID / ${#SEEDS[@]}))
+SEED_INDEX=$((TASK_ID % ${#SEEDS[@]}))
+if [ "$ARCH_INDEX" -ge "${#ARCHITECTURES[@]}" ]; then
+    echo "Invalid model-zoo validation task: $TASK_ID" >&2
+    exit 2
+fi
+
+export ARCHITECTURE=${ARCHITECTURES[$ARCH_INDEX]}
+export JAX_SEED=${SEEDS[$SEED_INDEX]}
+export WORKDIR="${WORKDIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
+export SIGMA0_SHARED_ROOT="${SIGMA0_SHARED_ROOT:-/projects/u6gb/public/sigma-0}"
+export MODEL_ZOO_ARTIFACT_ROOT="${MODEL_ZOO_ARTIFACT_ROOT:-$SIGMA0_SHARED_ROOT/artifacts/model_zoo_26tok}"
+export CE_CHECKPOINT_ROOT="${CE_CHECKPOINT_ROOT:-$MODEL_ZOO_ARTIFACT_ROOT/checkpoints/$ARCHITECTURE/seed_$JAX_SEED/run}"
+export CE_OUTPUT_JSON="${CE_OUTPUT_JSON:-$MODEL_ZOO_ARTIFACT_ROOT/validation_ce/$ARCHITECTURE/seed_$JAX_SEED.json}"
+export NODE_LOG_DIR="${NODE_LOG_DIR:-$MODEL_ZOO_ARTIFACT_ROOT/validation_logs/$ARCHITECTURE/seed_$JAX_SEED}"
+mkdir -p "$(dirname "$CE_OUTPUT_JSON")" "$NODE_LOG_DIR"
+
+CURRENT_COMMIT=$(git -C "$WORKDIR" rev-parse HEAD)
+if [ -n "${EXPECTED_COMMIT:-}" ] && [ "$CURRENT_COMMIT" != "$EXPECTED_COMMIT" ]; then
+    echo "Refusing code drift: expected $EXPECTED_COMMIT, found $CURRENT_COMMIT" >&2
+    exit 2
+fi
+[ -d "$CE_CHECKPOINT_ROOT" ] || { echo "Missing checkpoint root: $CE_CHECKPOINT_ROOT" >&2; exit 2; }
+
+export MODEL_ZOO_CE_EVAL=1
+export CE_TICKERS="${CE_TICKERS:-GOOG}"
+export CE_DATE_RANGE="${CE_DATE_RANGE:-2025-12-01,2025-12-31}"
+export CE_BATCH_SIZE="${CE_BATCH_SIZE:-8}"
+export CE_MAX_BATCHES="${CE_MAX_BATCHES:-8}"
+export CE_TARGETS="${CE_TARGETS:-0.70,0.65,0.60}"
+export CE_TARGET_TOLERANCE="${CE_TARGET_TOLERANCE:-0.01}"
+
+export TOKEN_MODE=26tok
+export GPUS_PER_NODE=1
+export PER_GPU_BSZ="$CE_BATCH_SIZE"
+export D_MODEL=1 N_LAYERS=1 BLOCKS=1 SSM_SIZE_BASE=4
+export OPT_CONFIG=standard SSM_LR_BASE=0.001 LR_FACTOR=1 WARMUP_END=0.01 WEIGHT_DECAY=0.05
+export EPOCHS=1 MINI_EPOCHS=1 MSG_SEQ_LEN=500
+export NO_AUTO_RESUME=1 USE_WANDB=False WANDB_MODE=offline
+export TICKERS="$CE_TICKERS"
+export TRAIN_DATE_RANGE="$CE_DATE_RANGE"
+export SQUASHFS_MODE=1
+export SQUASHFS_DIR="$WORKDIR/data/SP500-2022-2025"
+export SQUASHFS_MONTH="${SQUASHFS_MONTH:-${CE_DATE_RANGE:0:7}}"
+export FORBID_RAW_NPYZST=1
+unset DATA_ROOT DATA_INDEX_JSON
+
+echo "[validation] task=$TASK_ID architecture=$ARCHITECTURE seed=$JAX_SEED"
+echo "[validation] checkpoints=$CE_CHECKPOINT_ROOT output=$CE_OUTPUT_JSON"
+exec bash "$WORKDIR/run/base_model/train_full_autoreg.batch"

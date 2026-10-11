@@ -1,0 +1,7 @@
+name: package_smoke
+package: lobpipeline
+entrypoint: run/benchmarking/run_package.py
+run_name: smoke
+predictions_root: artifacts/inference/smoke/predictions
+scores_path: artifacts/inference/smoke/scores.json
+output_dir: artifacts/packages

@@ -1,0 +1,105 @@
+#!/bin/bash
+# Exact-shape, one-GPU memory/compile smoke for the parameter-matched model zoo.
+# One GPU is sufficient to test the production per-GPU micro-batch of eight;
+# production remains pure data parallel over 4 nodes x 4 GPUs.
+#SBATCH --job-name=sigma0-zoo-matched
+#SBATCH --array=0-5
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:1
+#SBATCH --mem=115000M
+#SBATCH --time=00:30:00
+#SBATCH --output=model_zoo_matched_%A_%a.out
+#SBATCH --error=model_zoo_matched_%A_%a.err
+
+set -euo pipefail
+
+ARCHITECTURES=(mamba3 s5 gdn kda transformer nsa)
+TASK_ID=${SLURM_ARRAY_TASK_ID:?SLURM_ARRAY_TASK_ID is required}
+if [ "$TASK_ID" -lt 0 ] || [ "$TASK_ID" -ge "${#ARCHITECTURES[@]}" ]; then
+    echo "Invalid model-zoo matched-smoke task index: $TASK_ID" >&2
+    exit 2
+fi
+
+export ARCHITECTURE=${ARCHITECTURES[$TASK_ID]}
+export WORKDIR="${WORKDIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
+export SIGMA0_SHARED_ROOT="${SIGMA0_SHARED_ROOT:-/projects/u6gb/public/sigma-0}"
+export MODEL_ZOO_ARTIFACT_ROOT="${MODEL_ZOO_ARTIFACT_ROOT:-$SIGMA0_SHARED_ROOT/artifacts/model_zoo_26tok}"
+export CHECKPOINT_BASE_DIR="$MODEL_ZOO_ARTIFACT_ROOT/matched_smoke/checkpoints/$ARCHITECTURE"
+export NODE_LOG_DIR="$MODEL_ZOO_ARTIFACT_ROOT/matched_smoke/logs/$ARCHITECTURE"
+mkdir -p "$CHECKPOINT_BASE_DIR" "$NODE_LOG_DIR"
+
+CURRENT_COMMIT=$(git -C "$WORKDIR" rev-parse HEAD)
+if [ -n "${EXPECTED_COMMIT:-}" ] && [ "$CURRENT_COMMIT" != "$EXPECTED_COMMIT" ]; then
+    echo "Refusing code drift: expected $EXPECTED_COMMIT, found $CURRENT_COMMIT" >&2
+    exit 2
+fi
+
+export TOKEN_MODE=26tok
+export N_LAYERS=6
+export BLOCKS=4
+export SSM_SIZE_BASE=256
+export GPUS_PER_NODE=1
+export PER_GPU_BSZ=8
+export GRAD_ACCUM_STEPS=1
+export MSG_SEQ_LEN=500
+export EPOCHS=1
+export MINI_EPOCHS=1
+export CURTAIL_EPOCHS=1
+export COSINE_STEPS=2
+export CHECKPOINT_EVERY=0
+export NO_AUTO_RESUME=1
+
+export OPT_CONFIG=standard
+export SSM_LR_BASE=0.002
+export LR_FACTOR=1
+export WARMUP_END=0.01
+export WEIGHT_DECAY=0.05
+
+export FORBID_RAW_NPYZST=0
+export QUANT_ROOT=/lus/lfs1aip2/projects/public/s5e/quant_team/quant
+export DATA_ROOT="$QUANT_ROOT/GOOG2016TO2021"
+export TICKERS=2022
+export DATA_INDEX_JSON="$WORKDIR/configs/train/goog_2022_smoke_index.json"
+export TRAIN_DATE_RANGE=2022-01-03,2022-01-05
+export TEST_DATE_RANGE=2022-01-06,2022-01-07
+export N_DATA_WORKERS=1
+export WANDB_PROJECT=sigma0-model-zoo-matched-smoke
+export WANDB_MODE=offline
+export USE_WANDB=False
+
+case "$ARCHITECTURE" in
+    mamba3)
+        export D_MODEL=256 EXPECTED_PARAMS=8099567
+        export MAMBA3_D_STATE=128 MAMBA3_EXPAND=2 MAMBA3_HEADDIM=64
+        export MAMBA3_CHUNK_SIZE=64 MAMBA3_ROPE_FRACTION=0.5
+        ;;
+    s5)
+        export D_MODEL=512 EXPECTED_PARAMS=8201069
+        ;;
+    gdn)
+        export D_MODEL=256 EXPECTED_PARAMS=8021621
+        export GDN_NUM_HEADS=4 GDN_HEAD_DIM=64 GDN_EXPAND_V=2
+        export GDN_CHUNK_SIZE=64 GDN_USE_CONV=True
+        ;;
+    kda)
+        export D_MODEL=256 EXPECTED_PARAMS=7916209
+        export GDN_NUM_HEADS=4 GDN_HEAD_DIM=56 GDN_EXPAND_V=2
+        export GDN_CHUNK_SIZE=64 GDN_USE_CONV=True
+        ;;
+    transformer)
+        export D_MODEL=224 EXPECTED_PARAMS=8041203
+        export N_HEADS=4 D_FF=800 ATTENTION_MAX_CACHE_LEN=26000
+        export DTYPE=bfloat16 USE_FLASH=True REMAT=1
+        ;;
+    nsa)
+        export D_MODEL=224 EXPECTED_PARAMS=8056828
+        export N_HEADS=4 D_FF=800 ATTENTION_MAX_CACHE_LEN=26000
+        export DTYPE=bfloat16 REMAT=1
+        export BLOCK_SIZE=26 BLOCK_COUNTS=16 WINDOW_SIZE=512 PE_TYPE=rope
+        ;;
+esac
+
+echo "[matched-smoke] task=$TASK_ID architecture=$ARCHITECTURE commit=$CURRENT_COMMIT"
+echo "[matched-smoke] params=$EXPECTED_PARAMS d_model=$D_MODEL layers=$N_LAYERS per_gpu_bsz=$PER_GPU_BSZ"
+exec bash "$WORKDIR/run/base_model/train_full_autoreg.batch"

@@ -1,0 +1,166 @@
+{
+  "cohort": {
+    "image_bytes_total": 1138700288,
+    "listing_identical_all": true,
+    "n_pass": 16,
+    "n_trees": 16,
+    "per_tree": [
+      {
+        "image_bytes": 69214208,
+        "name": "s2_group0_j6365536_evaluation_current_seed137",
+        "result": "PASS",
+        "source_bytes": 698818649,
+        "source_files": 25092
+      },
+      {
+        "image_bytes": 70459392,
+        "name": "s2_group0_j6365536_evaluation_current_seed42",
+        "result": "PASS",
+        "source_bytes": 699447689,
+        "source_files": 25092
+      },
+      {
+        "image_bytes": 70819840,
+        "name": "s2_group0_j6365536_evaluation_legacy_seed137",
+        "result": "PASS",
+        "source_bytes": 699903593,
+        "source_files": 25092
+      },
+      {
+        "image_bytes": 71880704,
+        "name": "s2_group0_j6365536_evaluation_legacy_seed42",
+        "result": "PASS",
+        "source_bytes": 700560193,
+        "source_files": 25092
+      },
+      {
+        "image_bytes": 71864320,
+        "name": "s2_group1_j6365537_evaluation_current_scale025_seed137",
+        "result": "PASS",
+        "source_bytes": 700263409,
+        "source_files": 25092
+      },
+      {
+        "image_bytes": 75612160,
+        "name": "s2_group1_j6365537_evaluation_current_scale025_seed42",
+        "result": "PASS",
+        "source_bytes": 704802957,
+        "source_files": 25092
+      },
+      {
+        "image_bytes": 69689344,
+        "name": "s2_group1_j6365537_evaluation_norm_before_gate_seed137",
+        "result": "PASS",
+        "source_bytes": 698286063,
+        "source_files": 25092
+      },
+      {
+        "image_bytes": 74428416,
+        "name": "s2_group1_j6365537_evaluation_norm_before_gate_seed42",
+        "result": "PASS",
+        "source_bytes": 702906948,
+        "source_files": 25092
+      },
+      {
+        "image_bytes": 69427200,
+        "name": "s2_group2_j6365538_evaluation_headnorm_before_gate_seed137",
+        "result": "PASS",
+        "source_bytes": 698012548,
+        "source_files": 25092
+      },
+      {
+        "image_bytes": 70406144,
+        "name": "s2_group2_j6365538_evaluation_headnorm_before_gate_seed42",
+        "result": "PASS",
+        "source_bytes": 698715391,
+        "source_files": 25092
+      },
+      {
+        "image_bytes": 69722112,
+        "name": "s2_group2_j6365538_evaluation_no_out_norm_seed137",
+        "result": "PASS",
+        "source_bytes": 698343439,
+        "source_files": 25092
+      },
+      {
+        "image_bytes": 69730304,
+        "name": "s2_group2_j6365538_evaluation_no_out_norm_seed42",
+        "result": "PASS",
+        "source_bytes": 698398372,
+        "source_files": 25092
+      },
+      {
+        "image_bytes": 69410816,
+        "name": "s2_group3_j6370212_evaluation_current_scale025_seed43",
+        "result": "PASS",
+        "source_bytes": 695876277,
+        "source_files": 25004
+      },
+      {
+        "image_bytes": 74842112,
+        "name": "s2_group3_j6370212_evaluation_current_seed43",
+        "result": "PASS",
+        "source_bytes": 691277466,
+        "source_files": 24580
+      },
+      {
+        "image_bytes": 70623232,
+        "name": "s2_group3_j6370212_evaluation_legacy_seed43",
+        "result": "PASS",
+        "source_bytes": 699505593,
+        "source_files": 25092
+      },
+      {
+        "image_bytes": 70569984,
+        "name": "s2_group3_j6370212_evaluation_norm_before_gate_seed43_running_deprecated_20260908T072636Z",
+        "result": "PASS",
+        "source_bytes": 699142055,
+        "source_files": 25092
+      }
+    ],
+    "sha256_identical_all": true,
+    "source_bytes_total": 11184260642,
+    "source_files_total": 400872,
+    "source_job": 6423589
+  },
+  "families": {
+    "data_cond/GOOG_#-#-#_message_real_id_#.csv": 3136,
+    "data_cond/GOOG_#-#-#_orderbook_real_id_#.csv": 3136,
+    "data_gen/GOOG_#-#-#_audit_real_id_#_gen_id_#.npz": 3136,
+    "data_gen/GOOG_#-#-#_message_real_id_#_gen_id_#.csv": 3136,
+    "data_gen/GOOG_#-#-#_orderbook_real_id_#_gen_id_#.csv": 3136,
+    "data_gen/GOOG_#-#-#_provenance_real_id_#_gen_id_#.csv": 3136,
+    "data_real/GOOG_#-#-#_message_real_id_#.csv": 3136,
+    "data_real/GOOG_#-#-#_orderbook_real_id_#.csv": 3136,
+    "sample_indices_rank#.json": 4
+  },
+  "generated_utc": "2026-09-08T23:30:35Z",
+  "inventory": {
+    "counts": {
+      "conditional_books": 3136,
+      "conditional_messages": 3136,
+      "generated_books": 3136,
+      "generated_messages": 3136,
+      "real_books": 3136,
+      "real_messages": 3136
+    },
+    "counts_match": true,
+    "from_image_seconds": 0.818,
+    "from_lustre_directory_seconds": 5.014,
+    "mount_seconds": 0.0047,
+    "note": "Both timings were taken at the measurement timestamp above, while the source directory still existed. The 16 source trees were removed afterwards by Slurm job 6424134, so the directory side cannot be re-measured; the images remain, with a second copy on a different filesystem.",
+    "tree": "s2/group0_j6365536/current_seed42"
+  },
+  "n_files_in_image": 25092,
+  "provenance": {
+    "images": "artifacts/gated_orchestrator/20260906T2044Z/inference_packs (job 6423589)",
+    "second_copy": "a separate filesystem, 16/16 sha256 verified",
+    "sources_removed_by": "Slurm job 6424134, submitted by the repository owner"
+  },
+  "quota": {
+    "files_free": 35646,
+    "files_limit": 51200000,
+    "files_used": 51164354,
+    "raw": "/lus/lfs1aip2 136117375296       0 214748364800       - 51164354       0 51200000       -"
+  }
+}

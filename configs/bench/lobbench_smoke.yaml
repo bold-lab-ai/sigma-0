@@ -1,0 +1,6 @@
+name: lobbench_smoke
+package: lobpipeline
+entrypoint: run/benchmarking/run_lobbench.py
+mode: smoke
+run_name: smoke
+metrics: l1,wasserstein,ks

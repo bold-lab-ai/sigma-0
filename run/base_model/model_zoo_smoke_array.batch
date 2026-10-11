@@ -1,0 +1,69 @@
+#!/bin/bash
+# One-shot GPU integration matrix for the six registered 26-token backbones.
+# The common values mirror configs/train/model_zoo_smoke_base.yaml; architecture
+# overrides mirror the six child configs.
+#SBATCH --job-name=sigma0-zoo-smoke
+#SBATCH --array=0-5
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:1
+#SBATCH --mem=115000M
+#SBATCH --time=00:20:00
+#SBATCH --output=model_zoo_smoke_%A_%a.out
+#SBATCH --error=model_zoo_smoke_%A_%a.err
+
+set -euo pipefail
+
+ARCHITECTURES=(mamba3 s5 gdn kda transformer nsa)
+TASK_ID=${SLURM_ARRAY_TASK_ID:?SLURM_ARRAY_TASK_ID is required}
+if [ "$TASK_ID" -lt 0 ] || [ "$TASK_ID" -ge "${#ARCHITECTURES[@]}" ]; then
+    echo "Invalid model-zoo task index: $TASK_ID" >&2
+    exit 2
+fi
+
+export WORKDIR="${WORKDIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
+export ARCHITECTURE="${ARCHITECTURES[$TASK_ID]}"
+export TOKEN_MODE=26tok
+export D_MODEL=64
+export N_LAYERS=2
+export BLOCKS=4
+export SSM_SIZE_BASE=64
+export PER_GPU_BSZ=1
+export GPUS_PER_NODE=1
+export MSG_SEQ_LEN=8
+export CURTAIL_EPOCHS=20
+export EPOCHS=1
+export NO_AUTO_RESUME=1
+export FORBID_RAW_NPYZST=0
+export QUANT_ROOT=/lus/lfs1aip2/projects/public/s5e/quant_team/quant
+export TICKERS=2022
+export DATA_ROOT="$QUANT_ROOT/GOOG2016TO2021"
+export DATA_INDEX_JSON="$WORKDIR/configs/train/goog_2022_smoke_index.json"
+export TRAIN_DATE_RANGE=2022-01-03,2022-01-05
+export TEST_DATE_RANGE=2022-01-06,2022-01-07
+export N_DATA_WORKERS=1
+export CHECKPOINT_EVERY=999999
+export WANDB_PROJECT=sigma0-model-zoo-smoke
+export WANDB_MODE=offline
+export USE_WANDB=False
+
+case "$ARCHITECTURE" in
+    mamba3)
+        export MAMBA3_D_STATE=16 MAMBA3_EXPAND=2 MAMBA3_HEADDIM=16
+        export MAMBA3_CHUNK_SIZE=16
+        ;;
+    gdn|kda)
+        export GDN_NUM_HEADS=4 GDN_HEAD_DIM=16 GDN_CHUNK_SIZE=16
+        ;;
+    transformer)
+        export N_HEADS=4 D_FF=128 ATTENTION_MAX_CACHE_LEN=416
+        ;;
+    nsa)
+        export N_HEADS=4 D_FF=128 ATTENTION_MAX_CACHE_LEN=416
+        export BLOCK_SIZE=26 BLOCK_COUNTS=2 WINDOW_SIZE=52 PE_TYPE=rope
+        ;;
+    s5) ;;
+esac
+
+echo "[model-zoo] task=$TASK_ID architecture=$ARCHITECTURE workdir=$WORKDIR"
+exec bash "$WORKDIR/run/base_model/train_full_autoreg.batch"

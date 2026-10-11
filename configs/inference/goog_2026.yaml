@@ -1,0 +1,8 @@
+name: goog_2026
+package: base_model
+entrypoint: run/base_model/run_inference.py
+architecture: mamba3
+token_mode: 26tok
+stock: GOOG
+period: "2026-01"
+output_root: artifacts/inference/goog_2026

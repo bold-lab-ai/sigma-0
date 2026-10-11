@@ -1,0 +1,6 @@
+name: lobbench_full
+package: lobpipeline
+entrypoint: run/benchmarking/run_lobbench.py
+mode: full
+run_name: full
+metrics: l1,wasserstein,ks

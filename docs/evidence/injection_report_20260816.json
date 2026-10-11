@@ -1,0 +1,133 @@
+{
+  "generated_utc": "2026-08-16T01:49:59Z",
+  "inputs": {
+    "arm_digest_i": "f7e3b455d6f36e433621a421104bfeda81d29558850cc94aaa776e5e2cf02370",
+    "arm_digest_o": "c07658e211e6d0e88ff2d865addb553e82cd7c98b1dcaf357b9e6f89e1b2fd34",
+    "arm_digest_p": "c07658e211e6d0e88ff2d865addb553e82cd7c98b1dcaf357b9e6f89e1b2fd34",
+    "arm_digest_p2": "c07658e211e6d0e88ff2d865addb553e82cd7c98b1dcaf357b9e6f89e1b2fd34",
+    "checkpoint_step": 28730,
+    "ckpt_metadata_sha256": "c3c113461f0531ca755c7676cdd0e5009472ad3299506aa4763501ef0cfa08dc",
+    "ckpt_pin": "m3-goog-78m-u6gb",
+    "commit_oi": "41ec9284282bffcf535bbd8eb8ea9d9c11781e97",
+    "commit_p": "82266d943dd9f9cd1442930033f03b24005c7b8c",
+    "data_day": "GOOG_2026-02-27",
+    "dir_i": "/home/u6gb/kangli.u6gb/pr16_doq_artifacts_20260816/arms_v2/arm_I",
+    "dir_o": "/home/u6gb/kangli.u6gb/pr16_doq_artifacts_20260816/arms_v2/arm_O",
+    "dir_p": "/home/u6gb/kangli.u6gb/pr16_doq_artifacts_20260816/arms_v2/arm_P",
+    "dir_p2": "/home/u6gb/kangli.u6gb/pr16_doq_artifacts_20260816/arms_v2/arm_P2",
+    "gpu": "0",
+    "node": "nid010434"
+  },
+  "j0_determinism": {
+    "mismatched_files": [],
+    "n_files": 41,
+    "n_mismatch": 0,
+    "pass": 1
+  },
+  "j1_off_means_off": {
+    "files_only_o": [],
+    "files_only_p": [],
+    "mismatched_files": [],
+    "n_files": 41,
+    "n_mismatch": 0,
+    "pass": 1
+  },
+  "j2_prefix": {
+    "cond_tree_pass": 1,
+    "n_windows": 4,
+    "pass": 1,
+    "real_tree_pass": 1
+  },
+  "j3_msg_row_k": {
+    "n_windows": 4,
+    "pass": 1,
+    "provenance_prefix_pass": 1
+  },
+  "j4_book_injection": {
+    "n_windows": 4,
+    "n_windows_pass": 4,
+    "pass": 1,
+    "per_window": [
+      {
+        "injected_side_matches": 1,
+        "mid": 3075200,
+        "mid_determinate": 1,
+        "mid_source_row": 7,
+        "other_side_unchanged": 1,
+        "p_exp": 3075100,
+        "pass": 1,
+        "precondition_passive": 1,
+        "precondition_uncrossed": 1,
+        "shape": "join",
+        "window_id": "2026-02-27_101845"
+      },
+      {
+        "injected_side_matches": 1,
+        "mid": 3081500,
+        "mid_determinate": 1,
+        "mid_source_row": 7,
+        "other_side_unchanged": 1,
+        "p_exp": 3081400,
+        "pass": 1,
+        "precondition_passive": 1,
+        "precondition_uncrossed": 1,
+        "shape": "improve_best",
+        "window_id": "2026-02-27_13827"
+      },
+      {
+        "injected_side_matches": 1,
+        "mid": 3053100,
+        "mid_determinate": 1,
+        "mid_source_row": 7,
+        "other_side_unchanged": 1,
+        "p_exp": 3053000,
+        "pass": 1,
+        "precondition_passive": 1,
+        "precondition_uncrossed": 1,
+        "shape": "improve_best",
+        "window_id": "2026-02-27_77480"
+      },
+      {
+        "injected_side_matches": 1,
+        "mid": 3066700,
+        "mid_determinate": 1,
+        "mid_source_row": 7,
+        "other_side_unchanged": 1,
+        "p_exp": 3066600,
+        "pass": 1,
+        "precondition_passive": 1,
+        "precondition_uncrossed": 1,
+        "shape": "improve_best",
+        "window_id": "2026-02-27_94763"
+      }
+    ],
+    "preconditions_pass": 1
+  },
+  "j5_divergence": {
+    "msg_first_divergence_per_window": [
+      10,
+      11,
+      10,
+      9
+    ],
+    "msg_prefix_through_k_identical": 1,
+    "orderbook_first_divergence_max": 8,
+    "orderbook_first_divergence_min": 8,
+    "pass": 1
+  },
+  "overall_pass": 1,
+  "params": {
+    "batch_size": 1,
+    "inject_event_type": 1,
+    "inject_price_offset_ticks": -1,
+    "inject_qty": 777,
+    "inject_side": 1,
+    "inject_step": 8,
+    "n_cond_msgs": 16,
+    "n_gen_msgs": 32,
+    "n_windows": 4,
+    "seed": 42,
+    "tick_size": 100
+  },
+  "schema": "sigma0.injection_verification.v1"
+}

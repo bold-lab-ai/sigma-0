@@ -1,0 +1,351 @@
+{
+  "aggregate": {
+    "acc": 0.8577247596153846,
+    "ce": 0.7149592041969299,
+    "ce_per_message_nats": 18.58880043029785
+  },
+  "checkpoint": {
+    "architecture": null,
+    "d_model": 1024,
+    "ignore_times": false,
+    "n_layers": 6,
+    "root": "/lus/lfs1aip2/projects/public/u6gb/sigma-0/checkpoints_selftrain/j5749206_9o8um51n_5749206",
+    "seed": 42,
+    "step": 62802
+  },
+  "per_field": [
+    {
+      "acc": 0.74209375,
+      "ce": 0.6290476322174072,
+      "ce_share_pct": 3.3840141249358062,
+      "ceiling_nats": 1.3862943611198906,
+      "field": "event_type",
+      "unigram_nats": 0.7505379886027757,
+      "width": 1
+    },
+    {
+      "acc": 0.8123125,
+      "ce": 0.3430735468864441,
+      "ce_share_pct": 1.845592716823562,
+      "ceiling_nats": 0.6931471805599453,
+      "field": "direction",
+      "unigram_nats": 0.6924602087823309,
+      "width": 1
+    },
+    {
+      "acc": 0.8279583333333332,
+      "ce": 0.6527492958315028,
+      "ce_share_pct": 10.534557594705054,
+      "ceiling_nats": 4.83621924617474,
+      "field": "price",
+      "unigram_nats": 1.5180581862974993,
+      "width": 3
+    },
+    {
+      "acc": 0.852609375,
+      "ce": 0.4575996845960617,
+      "ce_share_pct": 4.923391224860544,
+      "ceiling_nats": 4.605170185988092,
+      "field": "size",
+      "unigram_nats": 1.05761536506321,
+      "width": 2
+    },
+    {
+      "acc": 0.99996875,
+      "ce": 0.0005711040575988591,
+      "ce_share_pct": 0.0030723018397035328,
+      "ceiling_nats": 6.907755278982137,
+      "field": "delta_t_s",
+      "unigram_nats": 0.0003554211111443851,
+      "width": 1
+    },
+    {
+      "acc": 0.5385208333333332,
+      "ce": 2.9434608221054077,
+      "ce_share_pct": 47.503777876508906,
+      "ceiling_nats": 6.907755278982137,
+      "field": "delta_t_ns",
+      "unigram_nats": 3.3751387598093925,
+      "width": 3
+    },
+    {
+      "acc": 0.99709375,
+      "ce": 0.016928302589803934,
+      "ce_share_pct": 0.18213442715983463,
+      "ceiling_nats": 6.907755278982137,
+      "field": "time_s",
+      "unigram_nats": 3.8601834232659322,
+      "width": 2
+    },
+    {
+      "acc": 0.9691666666666667,
+      "ce": 0.11990334838628769,
+      "ce_share_pct": 1.9350901447764877,
+      "ceiling_nats": 6.907755278982137,
+      "field": "time_ns",
+      "unigram_nats": 6.760427738887169,
+      "width": 3
+    },
+    {
+      "acc": 0.9580625,
+      "ce": 0.14213615829469273,
+      "ce_share_pct": 2.2938999021640782,
+      "ceiling_nats": 4.972040615766184,
+      "field": "price_ref",
+      "unigram_nats": 1.046916370594954,
+      "width": 3
+    },
+    {
+      "acc": 0.997015625,
+      "ce": 0.017446860671043396,
+      "ce_share_pct": 0.1877136799274771,
+      "ceiling_nats": 4.61512051684126,
+      "field": "size_ref",
+      "unigram_nats": 1.0392557854487576,
+      "width": 2
+    },
+    {
+      "acc": 0.956328125,
+      "ce": 0.18467862531542778,
+      "ce_share_pct": 1.9869880900374877,
+      "ceiling_nats": 6.90875477931522,
+      "field": "time_s_ref",
+      "unigram_nats": 2.6976228652418404,
+      "width": 2
+    },
+    {
+      "acc": 0.7530833333333332,
+      "ce": 1.5626834233601887,
+      "ce_share_pct": 25.2197568512249,
+      "ceiling_nats": 6.90875477931522,
+      "field": "time_ns_ref",
+      "unigram_nats": 4.0614397022207145,
+      "width": 3
+    }
+  ],
+  "per_position": [
+    {
+      "acc": 0.74209375,
+      "ce": 0.6290476322174072,
+      "ceiling_nats": 1.3862943611198906,
+      "field": "event_type",
+      "position": 0,
+      "unigram_nats": 0.7505379886027757
+    },
+    {
+      "acc": 0.8123125,
+      "ce": 0.3430735468864441,
+      "ceiling_nats": 0.6931471805599453,
+      "field": "direction",
+      "position": 1,
+      "unigram_nats": 0.6924602087823309
+    },
+    {
+      "acc": 0.99871875,
+      "ce": 0.0073737455531954765,
+      "ceiling_nats": 0.6931471805599453,
+      "field": "price",
+      "position": 2,
+      "unigram_nats": 0.6925345554465463
+    },
+    {
+      "acc": 0.9999375,
+      "ce": 0.0005683224298991263,
+      "ceiling_nats": 6.907755278982137,
+      "field": "price",
+      "position": 3,
+      "unigram_nats": -0.0
+    },
+    {
+      "acc": 0.48521875,
+      "ce": 1.9503058195114136,
+      "ceiling_nats": 6.907755278982137,
+      "field": "price",
+      "position": 4,
+      "unigram_nats": 3.8616400034459524
+    },
+    {
+      "acc": 0.85128125,
+      "ce": 0.3580235540866852,
+      "ceiling_nats": 4.605170185988092,
+      "field": "size",
+      "position": 5,
+      "unigram_nats": 0.7369602933646527
+    },
+    {
+      "acc": 0.8539375,
+      "ce": 0.5571758151054382,
+      "ceiling_nats": 4.605170185988092,
+      "field": "size",
+      "position": 6,
+      "unigram_nats": 1.3782704367617675
+    },
+    {
+      "acc": 0.99996875,
+      "ce": 0.0005711040575988591,
+      "ceiling_nats": 6.907755278982137,
+      "field": "delta_t_s",
+      "position": 7,
+      "unigram_nats": 0.0003554211111443851
+    },
+    {
+      "acc": 0.86053125,
+      "ce": 0.7847005128860474,
+      "ceiling_nats": 6.907755278982137,
+      "field": "delta_t_ns",
+      "position": 8,
+      "unigram_nats": 0.8943424157799901
+    },
+    {
+      "acc": 0.46859375,
+      "ce": 3.2057371139526367,
+      "ceiling_nats": 6.907755278982137,
+      "field": "delta_t_ns",
+      "position": 9,
+      "unigram_nats": 3.7546882562048385
+    },
+    {
+      "acc": 0.2864375,
+      "ce": 4.839944839477539,
+      "ceiling_nats": 6.907755278982137,
+      "field": "delta_t_ns",
+      "position": 10,
+      "unigram_nats": 5.4763856074433495
+    },
+    {
+      "acc": 0.99721875,
+      "ce": 0.013650125823915005,
+      "ceiling_nats": 6.907755278982137,
+      "field": "time_s",
+      "position": 11,
+      "unigram_nats": 2.9781550565719783
+    },
+    {
+      "acc": 0.99696875,
+      "ce": 0.020206479355692863,
+      "ceiling_nats": 6.907755278982137,
+      "field": "time_s",
+      "position": 12,
+      "unigram_nats": 4.742211789959886
+    },
+    {
+      "acc": 0.99059375,
+      "ce": 0.045115627348423004,
+      "ceiling_nats": 6.907755278982137,
+      "field": "time_ns",
+      "position": 13,
+      "unigram_nats": 6.535284598461107
+    },
+    {
+      "acc": 0.966,
+      "ce": 0.1307278573513031,
+      "ceiling_nats": 6.907755278982137,
+      "field": "time_ns",
+      "position": 14,
+      "unigram_nats": 6.864298570742196
+    },
+    {
+      "acc": 0.95090625,
+      "ce": 0.18386656045913696,
+      "ceiling_nats": 6.907755278982137,
+      "field": "time_ns",
+      "position": 15,
+      "unigram_nats": 6.881700047458205
+    },
+    {
+      "acc": 0.999,
+      "ce": 0.005594603717327118,
+      "ceiling_nats": 1.0986122886681098,
+      "field": "price_ref",
+      "position": 16,
+      "unigram_nats": 0.5677283259326198
+    },
+    {
+      "acc": 1.0,
+      "ce": 1.2657687342709778e-08,
+      "ceiling_nats": 6.90875477931522,
+      "field": "price_ref",
+      "position": 17,
+      "unigram_nats": -0.0
+    },
+    {
+      "acc": 0.8751875,
+      "ce": 0.4208138585090637,
+      "ceiling_nats": 6.90875477931522,
+      "field": "price_ref",
+      "position": 18,
+      "unigram_nats": 2.5730207858522425
+    },
+    {
+      "acc": 0.996625,
+      "ce": 0.01816585287451744,
+      "ceiling_nats": 4.61512051684126,
+      "field": "size_ref",
+      "position": 19,
+      "unigram_nats": 0.7307105539353366
+    },
+    {
+      "acc": 0.99740625,
+      "ce": 0.01672786846756935,
+      "ceiling_nats": 4.61512051684126,
+      "field": "size_ref",
+      "position": 20,
+      "unigram_nats": 1.3478010169621788
+    },
+    {
+      "acc": 0.99740625,
+      "ce": 0.01621701568365097,
+      "ceiling_nats": 6.90875477931522,
+      "field": "time_s_ref",
+      "position": 21,
+      "unigram_nats": 2.177001431366749
+    },
+    {
+      "acc": 0.91525,
+      "ce": 0.3531402349472046,
+      "ceiling_nats": 6.90875477931522,
+      "field": "time_s_ref",
+      "position": 22,
+      "unigram_nats": 3.2182442991169316
+    },
+    {
+      "acc": 0.8095,
+      "ce": 1.2011792659759521,
+      "ceiling_nats": 6.90875477931522,
+      "field": "time_ns_ref",
+      "position": 23,
+      "unigram_nats": 3.9702914911501326
+    },
+    {
+      "acc": 0.7345625,
+      "ce": 1.5658527612686157,
+      "ceiling_nats": 6.90875477931522,
+      "field": "time_ns_ref",
+      "position": 24,
+      "unigram_nats": 4.101655657364894
+    },
+    {
+      "acc": 0.7151875,
+      "ce": 1.9210182428359985,
+      "ceiling_nats": 6.90875477931522,
+      "field": "time_ns_ref",
+      "position": 25,
+      "unigram_nats": 4.112371958147117
+    }
+  ],
+  "schema_version": 1,
+  "slice": {
+    "batch_size": 8,
+    "date_range": [
+      "2025-12-01",
+      "2025-12-31"
+    ],
+    "label": "train_period",
+    "max_batches": 8,
+    "messages": 32000,
+    "sequences": 64,
+    "tickers": [
+      "GOOG"
+    ]
+  }
+}

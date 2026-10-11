@@ -1,0 +1,200 @@
+#!/bin/bash
+# Exact-checkpoint GPU restore + decode gate before the full 3,136-window run.
+# This is an engineering preflight, not a LOBBench result.
+#SBATCH --job-name=sigma0-st-lobsmoke
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=115000M
+#SBATCH --time=00:30:00
+
+set -euo pipefail
+
+: "${LAUNCHER_WORKDIR:?LAUNCHER_WORKDIR is required}"
+: "${RUNTIME_WORKDIR:?RUNTIME_WORKDIR is required}"
+: "${EXPECTED_RUNTIME_COMMIT:?EXPECTED_RUNTIME_COMMIT is required}"
+: "${CHECKPOINT_PATH:?CHECKPOINT_PATH is required}"
+: "${CHECKPOINT_STEP:?CHECKPOINT_STEP is required}"
+: "${EXPECTED_CHECKPOINT_METADATA_SHA256:?EXPECTED_CHECKPOINT_METADATA_SHA256 is required}"
+: "${TASK_ROOT:?TASK_ROOT is required}"
+: "${SAMPLE_INDICES_FILE:?SAMPLE_INDICES_FILE is required}"
+: "${EXPECTED_DATASET_LENGTH:?EXPECTED_DATASET_LENGTH is required}"
+
+QUANT_ROOT="${QUANT_ROOT:-/lus/lfs1aip2/projects/public/s5e/quant_team/quant}"
+BENCHMARK_ROOT="${LOBBENCH_ROOT:-$QUANT_ROOT/AlphaTrade/lob_pipeline}"
+PYTHON="${PYTHON:-$QUANT_ROOT/miniforge3/bin/python}"
+STATE_HELPER="$LAUNCHER_WORKDIR/run/benchmarking/update_selftrain_lobbench_state.py"
+INFERENCE_VALIDATOR="$LAUNCHER_WORKDIR/run/benchmarking/validate_selftrain_inference.py"
+OUTPUT_ROOT="$TASK_ROOT/smoke"
+INFERENCE_DIR="$OUTPUT_ROOT/inference"
+SMOKE_INDICES="$OUTPUT_ROOT/smoke_indices_first8.txt"
+COMPLETE_MANIFEST="$OUTPUT_ROOT/smoke_complete.json"
+STEP_REF="${SLURM_JOB_ID}${SLURM_STEP_ID:+.${SLURM_STEP_ID}}"
+JOB_TMP="/tmp/${USER:-${LOGNAME:-unknown}}/sigma0/${SLURM_JOB_ID}_${SLURM_STEP_ID:-batch}"
+N_SEQUENCES=8
+N_COND_MSGS=16
+N_GEN_MSGS=32
+VALIDATE_EXISTING_OUTPUT="${SMOKE_VALIDATE_EXISTING_OUTPUT:-0}"
+
+# Keep the short-window preflight deterministic with the first eight frozen indices.
+# Its 48-message dataset length intentionally differs from the formal 500-message pool.
+record_state() {
+    "$PYTHON" "$STATE_HELPER" \
+        --task-root "$TASK_ROOT" \
+        --state "$1" \
+        --job-id "$STEP_REF" \
+        --action "$2" \
+        ${3:+--metric "$3"} \
+        ${4:+--alert "$4"}
+}
+
+on_error() {
+    local exit_code=$?
+    trap - ERR
+    record_state failed checkpoint_smoke_failed "exit_code=$exit_code" \
+        "See $TASK_ROOT/slurm/smoke_${SLURM_JOB_ID}.err"
+    exit "$exit_code"
+}
+trap on_error ERR
+
+record_state running checkpoint_smoke_started
+
+CURRENT_COMMIT=$(git -c safe.directory="$RUNTIME_WORKDIR" \
+    -C "$RUNTIME_WORKDIR" rev-parse HEAD)
+if [ "$CURRENT_COMMIT" != "$EXPECTED_RUNTIME_COMMIT" ]; then
+    echo "Refusing runtime drift: expected $EXPECTED_RUNTIME_COMMIT, found $CURRENT_COMMIT" >&2
+    exit 2
+fi
+METADATA_SHA=$(sha256sum "$CHECKPOINT_PATH/$CHECKPOINT_STEP/metadata/metadata" | awk '{print $1}')
+if [ "$METADATA_SHA" != "$EXPECTED_CHECKPOINT_METADATA_SHA256" ]; then
+    echo "Refusing checkpoint drift: expected $EXPECTED_CHECKPOINT_METADATA_SHA256, found $METADATA_SHA" >&2
+    exit 2
+fi
+[ -f "$CHECKPOINT_PATH/$CHECKPOINT_STEP/state/_METADATA" ] || {
+    echo "Checkpoint state metadata is missing" >&2
+    exit 2
+}
+if [ -f "$COMPLETE_MANIFEST" ]; then
+    echo "[smoke] already complete: $COMPLETE_MANIFEST"
+    record_state diagnostics_done checkpoint_smoke_already_complete
+    exit 0
+fi
+HAS_INFERENCE_OUTPUT=0
+if [ -d "$INFERENCE_DIR" ] && [ -n "$(find "$INFERENCE_DIR" -mindepth 1 -print -quit)" ]; then
+    HAS_INFERENCE_OUTPUT=1
+    if [ "$VALIDATE_EXISTING_OUTPUT" != "1" ]; then
+        echo "Refusing to mix with incomplete smoke output: $INFERENCE_DIR" >&2
+        exit 2
+    fi
+elif [ "$VALIDATE_EXISTING_OUTPUT" = "1" ]; then
+    echo "No existing smoke output is available to validate: $INFERENCE_DIR" >&2
+    exit 2
+fi
+
+mkdir -p "$INFERENCE_DIR" "$OUTPUT_ROOT" "$JOB_TMP"
+"$PYTHON" - "$SAMPLE_INDICES_FILE" "$SMOKE_INDICES" <<'PY'
+import sys
+from pathlib import Path
+
+source = [
+    line.strip()
+    for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+    if line.strip()
+]
+if len(source) < 8:
+    raise SystemExit("canonical sample-index file has fewer than eight rows")
+expected = "\n".join(source[:8]) + "\n"
+target = Path(sys.argv[2])
+if target.exists():
+    if target.read_text(encoding="utf-8") != expected:
+        raise SystemExit(f"existing smoke-index file has drifted: {target}")
+else:
+    target.write_text(expected, encoding="utf-8")
+PY
+
+if [ "$HAS_INFERENCE_OUTPUT" -eq 0 ]; then
+    export TMPDIR="$JOB_TMP"
+    export MPLCONFIGDIR="$JOB_TMP/matplotlib"
+    mkdir -p "$MPLCONFIGDIR"
+    module load cuda/12.6
+    CONDA_PREFIX="$QUANT_ROOT/miniforge3"
+    NVIDIA_SITE="$CONDA_PREFIX/lib/python3.12/site-packages/nvidia"
+    TORCH_LIB="$CONDA_PREFIX/lib/python3.12/site-packages/torch/lib"
+    export PATH="$CONDA_PREFIX/bin:$PATH"
+    export LD_LIBRARY_PATH="$TORCH_LIB:$NVIDIA_SITE/cuda_nvrtc/lib:$NVIDIA_SITE/cuda_runtime/lib:$NVIDIA_SITE/cusparse/lib:$NVIDIA_SITE/cuda_cupti/lib:$NVIDIA_SITE/cufft/lib:$NVIDIA_SITE/nvjitlink/lib:$NVIDIA_SITE/cusolver/lib:$NVIDIA_SITE/nccl/lib:$NVIDIA_SITE/cublas/lib:$NVIDIA_SITE/cudnn/lib:$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+    export PYTHONPATH="$RUNTIME_WORKDIR/src:$RUNTIME_WORKDIR:${PYTHONPATH:-}"
+    export PYTHONNOUSERSITE=1
+    export XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.90}"
+    unset MAMBA3_LEGACY_NORM || true
+    "$PYTHON" -c 'import jax, torch; backend=jax.default_backend(); assert backend == "gpu", backend; print(f"[cuda-preflight] jax={backend} torch={torch.__version__}")'
+
+    source "$LAUNCHER_WORKDIR/run/benchmarking/squashfs_helpers_no_delete.sh"
+    infer_squashfs_setup \
+        GOOG "${INFERENCE_MONTHS:-2026-01}" \
+        "${INFERENCE_SQUASHFS_DIR:-/lus/lfs1aip2/projects/public/s5e/quant_team/lob_preproc_sp500_squashfs}"
+    infer_squashfs_setup_wide_book \
+        GOOG "${INFERENCE_MONTHS:-2026-01}" \
+        "${WIDE_SQUASHFS_DIR:-/projects/public/s5e/quant_team/recon_2026-05/output/squashfs}" \
+        "${WIDE_LEVELS:-500}"
+    trap infer_squashfs_cleanup EXIT
+
+    CUDA_VISIBLE_DEVICES=0 "$PYTHON" -u -B \
+        "$RUNTIME_WORKDIR/run/base_model/runtime/inference.py" \
+        --architecture=mamba3 \
+        --token_mode=26tok \
+        --ckpt_path="$CHECKPOINT_PATH" \
+        --checkpoint_step="$CHECKPOINT_STEP" \
+        --data_dir="$INFER_DATA_DIR_NODE" \
+        --wide_book_dir="$INFER_WIDE_BOOK_DIR_NODE" \
+        --wide_levels="${WIDE_LEVELS:-500}" \
+        --save_dir="$INFERENCE_DIR" \
+        --stock=GOOG \
+        --n_sequences="$N_SEQUENCES" \
+        --batch_size=1 \
+        --n_cond_msgs="$N_COND_MSGS" \
+        --n_gen_msgs="$N_GEN_MSGS" \
+        --test_split=1.0 \
+        --sample_indices_file="$SMOKE_INDICES" \
+        --seed="${GENERATION_SEED:-2026}"
+else
+    record_state running checkpoint_smoke_validation_resumed "sequences=8"
+fi
+
+"$PYTHON" "$INFERENCE_VALIDATOR" \
+    --runtime-validator "$RUNTIME_WORKDIR/run/benchmarking/validate_model_zoo_evaluation.py" \
+    "$INFERENCE_DIR" \
+    --expected-sequences "$N_SEQUENCES" \
+    --generated-rows "$N_GEN_MSGS" \
+    --conditioning-rows "$N_COND_MSGS" \
+    --world-size 1 \
+    --expected-indices-file "$SMOKE_INDICES" \
+    > "$OUTPUT_ROOT/inference_inventory.json"
+
+"$PYTHON" - "$OUTPUT_ROOT/inference_inventory.json" "$COMPLETE_MANIFEST" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+payload.update({
+    "status": "restore_decode_smoke_only",
+    "training_job_id": os.environ.get("TRAIN_JOB_ID"),
+    "checkpoint_path": os.environ["CHECKPOINT_PATH"],
+    "checkpoint_step": int(os.environ["CHECKPOINT_STEP"]),
+    "checkpoint_metadata_sha256": os.environ["EXPECTED_CHECKPOINT_METADATA_SHA256"],
+    "sigma0_runtime_commit": os.environ["EXPECTED_RUNTIME_COMMIT"],
+    "smoke_job_id": os.environ["SLURM_JOB_ID"],
+    "smoke_step_id": os.environ.get("SLURM_STEP_ID"),
+    "conditioning_messages": 16,
+    "generated_messages": 32,
+})
+Path(sys.argv[2]).write_text(
+    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+PY
+
+record_state diagnostics_done checkpoint_smoke_complete "sequences=8"
+echo "[smoke] complete manifest=$COMPLETE_MANIFEST"

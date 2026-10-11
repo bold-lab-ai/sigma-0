@@ -1,0 +1,14 @@
+name: mamba3_sp500
+package: base_model
+entrypoint: run/base_model/train_base_model.py
+model: mamba3
+dataset: sp500
+legacy_batch: run/base_model/train_full_autoreg.batch
+legacy_workdir: .
+sbatch_nodes: 32
+sbatch_time: 23:59:00
+sbatch_job_name: sigma0-mamba3-sp500
+env_MODEL_PRESET: 75m
+env_EPOCHS: 40
+env_ARCHITECTURE: mamba3
+env_TOKEN_MODE: 26tok

@@ -1,0 +1,216 @@
+#!/bin/bash
+# Three-seed, parameter-matched model-zoo training matrix.
+# Array layout is architecture-major: task = architecture_index * 3 + seed_index.
+# Submit only through submit_model_zoo_production.sh after the smoke gates pass.
+#SBATCH --job-name=sigma0-zoo-prod
+#SBATCH --array=0-17%6
+#SBATCH --nodes=4
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:4
+#SBATCH --mem=0
+#SBATCH --time=08:00:00
+#SBATCH --output=model_zoo_prod_%A_%a.out
+#SBATCH --error=model_zoo_prod_%A_%a.err
+
+set -euo pipefail
+
+ARCHITECTURES=(mamba3 s5 gdn kda transformer nsa)
+SEEDS=(5 42 137)
+TASK_ID=${SLURM_ARRAY_TASK_ID:?SLURM_ARRAY_TASK_ID is required}
+ARCH_INDEX=$((TASK_ID / ${#SEEDS[@]}))
+SEED_INDEX=$((TASK_ID % ${#SEEDS[@]}))
+if [ "$ARCH_INDEX" -ge "${#ARCHITECTURES[@]}" ]; then
+    echo "Invalid model-zoo production task: $TASK_ID" >&2
+    exit 2
+fi
+
+export ARCHITECTURE=${ARCHITECTURES[$ARCH_INDEX]}
+export JAX_SEED=${SEEDS[$SEED_INDEX]}
+export WORKDIR="${WORKDIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
+export SIGMA0_SHARED_ROOT="${SIGMA0_SHARED_ROOT:-/projects/u6gb/public/sigma-0}"
+export MODEL_ZOO_ARTIFACT_ROOT="${MODEL_ZOO_ARTIFACT_ROOT:-$SIGMA0_SHARED_ROOT/artifacts/model_zoo_26tok}"
+export CHECKPOINT_BASE_DIR="$MODEL_ZOO_ARTIFACT_ROOT/checkpoints/$ARCHITECTURE/seed_$JAX_SEED"
+export CHECKPOINT_RUN_DIR="$CHECKPOINT_BASE_DIR/run"
+export NODE_LOG_DIR="$MODEL_ZOO_ARTIFACT_ROOT/train_logs/$ARCHITECTURE/seed_$JAX_SEED"
+mkdir -p "$CHECKPOINT_BASE_DIR" "$NODE_LOG_DIR"
+
+TARGET_OPTIMIZER_STEPS="${OPTIMIZER_STEPS:-30000}"
+RESUME_STEP="${MODEL_ZOO_RESUME_STEP:-}"
+LATEST_CHECKPOINT=""
+if [ -d "$CHECKPOINT_RUN_DIR" ]; then
+    LATEST_CHECKPOINT=$(find "$CHECKPOINT_RUN_DIR" -mindepth 1 -maxdepth 1 \
+        -type d -printf '%f\n' | awk '/^[0-9]+$/' | sort -n | tail -n 1)
+fi
+if [ -n "$LATEST_CHECKPOINT" ]; then
+    if [ -z "$RESUME_STEP" ]; then
+        echo "Refusing to overwrite existing production checkpoints: $CHECKPOINT_RUN_DIR" >&2
+        exit 2
+    fi
+    if ! [[ "$RESUME_STEP" =~ ^[0-9]+$ ]]; then
+        echo "MODEL_ZOO_RESUME_STEP must be numeric, got: $RESUME_STEP" >&2
+        exit 2
+    fi
+    if [ "$RESUME_STEP" != "$LATEST_CHECKPOINT" ]; then
+        echo "Refusing non-latest resume: requested $RESUME_STEP, latest is $LATEST_CHECKPOINT" >&2
+        exit 2
+    fi
+    if [ "$RESUME_STEP" -ge "$TARGET_OPTIMIZER_STEPS" ]; then
+        echo "Refusing completed/over-budget resume: step=$RESUME_STEP target=$TARGET_OPTIMIZER_STEPS" >&2
+        exit 2
+    fi
+    if [ ! -d "$CHECKPOINT_RUN_DIR/$RESUME_STEP/state" ] || \
+            [ ! -d "$CHECKPOINT_RUN_DIR/$RESUME_STEP/metadata" ]; then
+        echo "Refusing incomplete checkpoint: $CHECKPOINT_RUN_DIR/$RESUME_STEP" >&2
+        exit 2
+    fi
+    export RESTORE_PATH="$CHECKPOINT_RUN_DIR"
+    export RESTORE_STEP="$RESUME_STEP"
+    export RESUME_FROM_STEP="$RESUME_STEP"
+    export RESTORE_RESET_SCHEDULE=False
+    echo "[production-resume] restoring optimizer/schedule/data position from step $RESUME_STEP"
+elif [ -n "$RESUME_STEP" ]; then
+    echo "Refusing resume without existing checkpoints: $CHECKPOINT_RUN_DIR" >&2
+    exit 2
+fi
+
+CURRENT_COMMIT=$(git -C "$WORKDIR" rev-parse HEAD)
+if [ -n "${EXPECTED_COMMIT:-}" ] && [ "$CURRENT_COMMIT" != "$EXPECTED_COMMIT" ]; then
+    echo "Refusing code drift: expected $EXPECTED_COMMIT, found $CURRENT_COMMIT" >&2
+    exit 2
+fi
+
+# Common experiment controls. Architecture-specific widths below match the full
+# optimizer-visible model to the d_model=256 Mamba3 reference (8,099,567 params)
+# within 5%, while retaining six fused backbone layers for every model.
+export TOKEN_MODE=26tok
+export N_LAYERS=6
+export BLOCKS=4
+export SSM_SIZE_BASE=256
+export GPUS_PER_NODE=4
+export MSG_SEQ_LEN=500
+export EPOCHS=1
+export MINI_EPOCHS=1
+
+# Scientific batch invariant: 4 nodes x 4 GPUs x micro-batch 8 = 128 sequences
+# per optimizer update. If a later memory smoke requires a smaller micro-batch,
+# increase GRAD_ACCUM_STEPS so this assertion still resolves to 128.
+export TARGET_GLOBAL_BSZ=128
+export PER_GPU_BSZ=8
+export GRAD_ACCUM_STEPS=1
+# Match the proven Mamba3 multi-node execution path for every architecture:
+# K=10 node-local Adam/AdamW steps, each with an NVLink pmean over the four
+# local GPUs, followed by one plain parameter pmean across the four nodes.
+# node_wrapper.sh supplies the shared NCCL/OFI/Slingshot topology.
+export HIERARCHICAL=True
+export LOCAL_STEPS_K=10
+export DILOCO_OUTER=none
+
+# Same optimizer and schedule for every architecture. The thesis architecture
+# comparison used AdamW at 5e-4 (with a 1e-4--1e-3 sweep showing little
+# sensitivity); keep that empirically supported setting instead of applying an
+# unvalidated inverse-width extrapolation to these smaller models.
+export OPT_CONFIG=standard
+export SSM_LR_BASE=0.0005
+export LR_FACTOR=1
+export WARMUP_END=0.01
+export WEIGHT_DECAY=0.05
+
+# Paper corpus: GOOG only, from January 2022 through November 2025. December
+# 2025 is reserved for fixed validation CE; January 2026 remains the untouched
+# LOBBench test period. Monthly SquashFS shards carry their own index.json
+# files, avoiding raw-file Lustre metadata storms.
+export TICKERS=GOOG
+export TRAIN_DATE_RANGE=2022-01-01,2025-11-30
+export SQUASHFS_MULTI_MODE=1
+export SQUASHFS_DIR="$WORKDIR/data/SP500-2022-2025"
+export SQUASHFS_MONTHS=2022-01,2022-02,2022-03,2022-04,2022-05,2022-06,2022-07,2022-08,2022-09,2022-10,2022-11,2022-12,2023-01,2023-02,2023-03,2023-04,2023-05,2023-06,2023-07,2023-08,2023-09,2023-10,2023-11,2023-12,2024-01,2024-02,2024-03,2024-04,2024-05,2024-06,2024-07,2024-08,2024-09,2024-10,2024-11,2024-12,2025-01,2025-02,2025-03,2025-04,2025-05,2025-06,2025-07,2025-08,2025-09,2025-10,2025-11
+export FORBID_RAW_NPYZST=1
+unset DATA_ROOT DATA_INDEX_JSON
+export N_DATA_WORKERS="${N_DATA_WORKERS:-4}"
+
+# Production tracking is part of the experiment contract: do not inherit a
+# stale shell default (the legacy wrapper otherwise falls back to "anonymous").
+# A real multi-node preflight may reuse this exact script with MODEL_ZOO_SMOKE=1.
+if [ "${MODEL_ZOO_SMOKE:-0}" = "1" ]; then
+    export WANDB_MODE=offline
+    export USE_WANDB=False
+else
+    export WANDB_PROJECT=icaif_model_paper
+    export WANDB_ENTITY=oxford-lob
+    export WANDB_MODE=online
+    export USE_WANDB=True
+    if [ -n "$RESUME_STEP" ]; then
+        : "${WANDB_RUN_ID:?WANDB_RUN_ID is required for a production continuation}"
+        export WANDB_RESUME=must
+    fi
+fi
+
+case "$ARCHITECTURE" in
+    mamba3)
+        export D_MODEL=256 EXPECTED_PARAMS=8099567
+        export MAMBA3_D_STATE=128 MAMBA3_EXPAND=2 MAMBA3_HEADDIM=64
+        export MAMBA3_CHUNK_SIZE=64 MAMBA3_ROPE_FRACTION=0.5
+        ;;
+    s5)
+        export D_MODEL=512 EXPECTED_PARAMS=8201069
+        ;;
+    gdn)
+        export D_MODEL=256 EXPECTED_PARAMS=8021621
+        export GDN_NUM_HEADS=4 GDN_HEAD_DIM=64 GDN_EXPAND_V=2
+        export GDN_CHUNK_SIZE=64 GDN_USE_CONV=True
+        ;;
+    kda)
+        export D_MODEL=256 EXPECTED_PARAMS=7916209
+        export GDN_NUM_HEADS=4 GDN_HEAD_DIM=56 GDN_EXPAND_V=2
+        export GDN_CHUNK_SIZE=64 GDN_USE_CONV=True
+        ;;
+    transformer)
+        export D_MODEL=224 EXPECTED_PARAMS=8041203
+        export N_HEADS=4 D_FF=800 ATTENTION_MAX_CACHE_LEN=26000
+        export DTYPE=bfloat16 USE_FLASH=True REMAT=1
+        ;;
+    nsa)
+        export D_MODEL=224 EXPECTED_PARAMS=8056828
+        export N_HEADS=4 D_FF=800 ATTENTION_MAX_CACHE_LEN=26000
+        export DTYPE=bfloat16 REMAT=1
+        export BLOCK_SIZE=26 BLOCK_COUNTS=16 WINDOW_SIZE=512 PE_TYPE=rope
+        ;;
+esac
+
+ACTUAL_GLOBAL_BSZ=$((PER_GPU_BSZ * GPUS_PER_NODE * SLURM_NNODES * GRAD_ACCUM_STEPS))
+if [ "$ACTUAL_GLOBAL_BSZ" -ne "$TARGET_GLOBAL_BSZ" ]; then
+    echo "Refusing unmatched global batch: micro=$PER_GPU_BSZ gpus/node=$GPUS_PER_NODE nodes=$SLURM_NNODES accum=$GRAD_ACCUM_STEPS gives $ACTUAL_GLOBAL_BSZ, expected $TARGET_GLOBAL_BSZ" >&2
+    exit 2
+fi
+
+# CURTAIL_EPOCHS is a zero-based micro-batch index in the legacy trainer.
+# Derive it from optimizer updates so accumulation changes neither the schedule
+# length nor the number of examples seen by a run.
+export OPTIMIZER_STEPS="$TARGET_OPTIMIZER_STEPS"
+export CURTAIL_EPOCHS=$((OPTIMIZER_STEPS * GRAD_ACCUM_STEPS - 1))
+export UNIFORM_TICKER_BATCHES=True
+export MAX_TRAIN_BATCHES=$((OPTIMIZER_STEPS * GRAD_ACCUM_STEPS))
+export COSINE_STEPS="${COSINE_STEPS:-$OPTIMIZER_STEPS}"
+# train_epoch counts one completed lax.scan group as one callback step. Preserve
+# checkpoints every 1,000 inner optimizer updates under K=10 local steps.
+export CHECKPOINT_INNER_STEPS="${CHECKPOINT_INNER_STEPS:-1000}"
+if [ $((CHECKPOINT_INNER_STEPS % LOCAL_STEPS_K)) -ne 0 ]; then
+    echo "CHECKPOINT_INNER_STEPS must be divisible by LOCAL_STEPS_K" >&2
+    exit 2
+fi
+export CHECKPOINT_EVERY=$((CHECKPOINT_INNER_STEPS / LOCAL_STEPS_K))
+export NO_AUTO_RESUME=1
+
+TOKENS_PER_OPT_STEP=$((TARGET_GLOBAL_BSZ * MSG_SEQ_LEN * 26))
+MAX_TOKEN_EXPOSURE=$((TOKENS_PER_OPT_STEP * OPTIMIZER_STEPS))
+
+echo "[production] task=$TASK_ID architecture=$ARCHITECTURE seed=$JAX_SEED"
+echo "[production] commit=$CURRENT_COMMIT checkpoints=$CHECKPOINT_BASE_DIR"
+echo "[production] params=$EXPECTED_PARAMS d_model=$D_MODEL layers=$N_LAYERS"
+echo "[production] optimizer=$OPT_CONFIG peak_lr=$SSM_LR_BASE warmup=$WARMUP_END weight_decay=$WEIGHT_DECAY"
+echo "[production] global_bsz=$ACTUAL_GLOBAL_BSZ optimizer_steps=$OPTIMIZER_STEPS tokens/step=$TOKENS_PER_OPT_STEP max_token_exposure=$MAX_TOKEN_EXPOSURE"
+if [ "${MODEL_ZOO_CONFIG_ONLY:-0}" = "1" ]; then
+    echo "[production-config-only] restore_path=${RESTORE_PATH:-none} restore_step=${RESTORE_STEP:-none} resume_from_step=${RESUME_FROM_STEP:-none} wandb_run_id=${WANDB_RUN_ID:-none}"
+    exit 0
+fi
+exec bash "$WORKDIR/run/base_model/train_full_autoreg.batch"

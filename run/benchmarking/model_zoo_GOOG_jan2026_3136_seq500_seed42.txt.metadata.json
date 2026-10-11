@@ -1,0 +1,158 @@
+{
+  "conditioning_messages": 250,
+  "dataset_length": 226002,
+  "files": [
+    {
+      "book_rows": 8636285,
+      "message_file": "GOOG/GOOG_2026-01-02_34200000_57600000_message_10_proc.npy",
+      "message_rows": 8636262,
+      "sequences": 17272,
+      "usable_rows": 8636262
+    },
+    {
+      "book_rows": 6591610,
+      "message_file": "GOOG/GOOG_2026-01-05_34200000_57600000_message_10_proc.npy",
+      "message_rows": 6591566,
+      "sequences": 13183,
+      "usable_rows": 6591566
+    },
+    {
+      "book_rows": 4627007,
+      "message_file": "GOOG/GOOG_2026-01-06_34200000_57600000_message_10_proc.npy",
+      "message_rows": 4626979,
+      "sequences": 9253,
+      "usable_rows": 4626979
+    },
+    {
+      "book_rows": 4993344,
+      "message_file": "GOOG/GOOG_2026-01-07_34200000_57600000_message_10_proc.npy",
+      "message_rows": 4993315,
+      "sequences": 9986,
+      "usable_rows": 4993315
+    },
+    {
+      "book_rows": 5707801,
+      "message_file": "GOOG/GOOG_2026-01-08_34200000_57600000_message_10_proc.npy",
+      "message_rows": 5707780,
+      "sequences": 11415,
+      "usable_rows": 5707780
+    },
+    {
+      "book_rows": 5007060,
+      "message_file": "GOOG/GOOG_2026-01-09_34200000_57600000_message_10_proc.npy",
+      "message_rows": 5007031,
+      "sequences": 10014,
+      "usable_rows": 5007031
+    },
+    {
+      "book_rows": 4457956,
+      "message_file": "GOOG/GOOG_2026-01-12_34200000_57600000_message_10_proc.npy",
+      "message_rows": 4457929,
+      "sequences": 8915,
+      "usable_rows": 4457929
+    },
+    {
+      "book_rows": 5525275,
+      "message_file": "GOOG/GOOG_2026-01-13_34200000_57600000_message_10_proc.npy",
+      "message_rows": 5525241,
+      "sequences": 11050,
+      "usable_rows": 5525241
+    },
+    {
+      "book_rows": 5902026,
+      "message_file": "GOOG/GOOG_2026-01-14_34200000_57600000_message_10_proc.npy",
+      "message_rows": 5901999,
+      "sequences": 11803,
+      "usable_rows": 5901999
+    },
+    {
+      "book_rows": 5521432,
+      "message_file": "GOOG/GOOG_2026-01-15_34200000_57600000_message_10_proc.npy",
+      "message_rows": 5521400,
+      "sequences": 11042,
+      "usable_rows": 5521400
+    },
+    {
+      "book_rows": 4717479,
+      "message_file": "GOOG/GOOG_2026-01-16_34200000_57600000_message_10_proc.npy",
+      "message_rows": 4717454,
+      "sequences": 9434,
+      "usable_rows": 4717454
+    },
+    {
+      "book_rows": 7187323,
+      "message_file": "GOOG/GOOG_2026-01-20_34200000_57600000_message_10_proc.npy",
+      "message_rows": 7187293,
+      "sequences": 14374,
+      "usable_rows": 7187293
+    },
+    {
+      "book_rows": 7571953,
+      "message_file": "GOOG/GOOG_2026-01-21_34200000_57600000_message_10_proc.npy",
+      "message_rows": 7571915,
+      "sequences": 15143,
+      "usable_rows": 7571915
+    },
+    {
+      "book_rows": 5051093,
+      "message_file": "GOOG/GOOG_2026-01-22_34200000_57600000_message_10_proc.npy",
+      "message_rows": 5051040,
+      "sequences": 10102,
+      "usable_rows": 5051040
+    },
+    {
+      "book_rows": 4261467,
+      "message_file": "GOOG/GOOG_2026-01-23_34200000_57600000_message_10_proc.npy",
+      "message_rows": 4261441,
+      "sequences": 8522,
+      "usable_rows": 4261441
+    },
+    {
+      "book_rows": 3750934,
+      "message_file": "GOOG/GOOG_2026-01-26_34200000_57600000_message_10_proc.npy",
+      "message_rows": 3750908,
+      "sequences": 7501,
+      "usable_rows": 3750908
+    },
+    {
+      "book_rows": 3147263,
+      "message_file": "GOOG/GOOG_2026-01-27_34200000_57600000_message_10_proc.npy",
+      "message_rows": 3147227,
+      "sequences": 6294,
+      "usable_rows": 3147227
+    },
+    {
+      "book_rows": 4723106,
+      "message_file": "GOOG/GOOG_2026-01-28_34200000_57600000_message_10_proc.npy",
+      "message_rows": 4723063,
+      "sequences": 9446,
+      "usable_rows": 4723063
+    },
+    {
+      "book_rows": 8104094,
+      "message_file": "GOOG/GOOG_2026-01-29_34200000_57600000_message_10_proc.npy",
+      "message_rows": 8104060,
+      "sequences": 16208,
+      "usable_rows": 8104060
+    },
+    {
+      "book_rows": 7522674,
+      "message_file": "GOOG/GOOG_2026-01-30_34200000_57600000_message_10_proc.npy",
+      "message_rows": 7522643,
+      "sequences": 15045,
+      "usable_rows": 7522643
+    }
+  ],
+  "generated_messages": 250,
+  "n_samples": 3136,
+  "period": "2026-01",
+  "sample_indices_sha256": "0c41de5111b8996b3ac00ca8f481c98b5453dd4c9562e56f9730d364518faf25",
+  "selection_algorithm": "numpy.random.default_rng(seed).choice(replace=False), sorted",
+  "selection_seed": 42,
+  "sequence_messages": 500,
+  "source_shape_index": "/lus/lfs1aip2/projects/public/s5e/quant_team/lob_preproc_sp500_squashfs/index_2026-01.json",
+  "source_shape_index_sha256": "602d12b8dd120e86eb6930f272d57b5aaf880f61bc155018cca217eb46a0c9e0",
+  "test_split": 1.0,
+  "ticker": "GOOG",
+  "version": 1
+}

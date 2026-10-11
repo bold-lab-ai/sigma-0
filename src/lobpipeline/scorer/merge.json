@@ -1,0 +1,54 @@
+{
+  "contract": "this records a three-way merge, not a copy: a base, the two sides that were merged, and the SHA-256 of the result as committed; nothing here resolves a branch name at read time, and a tree whose hash does not match this record is a modified tree rather than the merge it claims to be",
+  "lob_bench": {
+    "base": {
+      "repo": "https://github.com/peernagy/lob_bench",
+      "commit": "dc62ab432913b85e42df251068b598d46e8372a8",
+      "note": "the common ancestor of both sides, found with GitHub's compare API; the merge is a real three-way merge against it rather than a hand-picked selection"
+    },
+    "ours": {
+      "source": "/lus/lfs1aip2/projects/public/s5e/quant_team/quant/AlphaTrade/lob_pipeline/lob_bench",
+      "repo": "https://github.com/FLAIROx/lob_pipeline",
+      "commit": "1128d37c9ceeaf5a74db25396d8bb238ef0ceb16",
+      "note": "the scorer sigma-0 has been running. This commit is on no remote: it sits on the local branch try-merge-daily, which has no upstream, so it resolves on one filesystem and nowhere else. That is why the merge result is committed here rather than referenced."
+    },
+    "theirs": {
+      "repo": "https://github.com/Sat-A/lob_bench",
+      "ref": "main",
+      "commit": "2aa7d5d844b5a051c9474cf598e10d7f46f39506",
+      "commit_date": "2026-02-23"
+    },
+    "merged": "2026-08-18",
+    "path": "lob_bench",
+    "file_count": 37,
+    "tree_sha256": "a4c2e3828a384ebcee570c9b2a12e5bd857cc89d29326f916cafa8461c012164",
+    "production_code_unchanged": "No longer true, and deliberately so. This PR patches scoring.py twice. First, the time-lagged path sliced both merged frames by [lag:] and then evaluated both statistics on that one frame, which truncates and never offsets, so --time_lagged returned a contemporaneous conditional on a shortened stream. The offset now lives between the two score arrays (sl[:-lag] against se[lag:]) in both copies of the logic, and tests/unit/test_time_lag_offset.py fails three of its assertions if the patch is reverted. Second, the same two copies merged the prompt and the continuation with ignore_index=False; each half arrives with its own 0-based RangeIndex (data_loading reads CSVs with index_col=False), so the merged frame carried duplicate labels and the first statistic that assigns a Series into a frame -- eval.l1_volume does -- raised 'cannot reindex on an axis with duplicate labels' on every sequence of the mode's first real-data run. The merges now use ignore_index=True; the index carries no information (time is a column), and test_merged_frames_are_safe_for_index_aligned_statistics fails if this is reverted. Every other .py the scorer runs -- run_bench, metrics, partitioning, eval, plotting, impact, run_plotting, merge_shards -- is still byte-identical to ours. data_loading.py changes two lines: the demo path inside its __main__ block, which no import path executes, and a module-level `import os` that does run on import -- a stdlib import with no side effects, but a line the scorer executes.",
+    "what_theirs_brought": [
+      "tests/test_parallel.py: 3 asserts and 6 numeric comparisons showing the vectorised bootstrap fast paths return the same losses and the same intervals as the reference _bootstrap, for wasserstein, ks and l1. Nothing in this repository checked that before.",
+      "run_bench_metrics_array.sh: the SLURM array that scores one metric shard per task",
+      "CONTEXTUAL_SCORING_GUIDE.md and DATA_PIPELINE.md",
+      "five tests/*.sh phase scripts, a .gitignore, and a rewritten README"
+    ],
+    "conflicts_resolved_to_ours": {
+      "run_bench.py": "four hunks; ours adds --time_lag, traceback printing on failure, and a --metrics filter that respects each mode's key namespace instead of only the unconditional one",
+      "metrics.py": "six hunks; ours adds the JAX and numba bootstrap paths and the OOM fallback around them",
+      "scoring.py": "three hunks; ours stacks metrics across threads instead of inline",
+      "run_plotting.py": "three hunks; ours gathers score files across reference directories and filters models with too few valid metrics"
+    },
+    "not_taken": {
+      "the four *_levels scores": "theirs still defines limit_ask/bid_order_levels and ask/bid_cancellation_levels. Ours replaced them with BBO-relative *_ticks after the 2026-03-19 compute-node restarts, when those four drifted about sixteen times as much as the other seventeen because they depend on reconstructing book levels. Taking them back would change WS-21."
+    },
+    "known_defects_carried_in": {
+      "tests/test_contextual_scoring.py": "carried in unchanged, but it is a demonstration script: 0 asserts, 58 prints, no failure path. It also prints 'Per-regime metrics preserved (no aggregation)' and a return structure of dict[metric: dict[regime_id: ...]], which compute_metrics_context has not produced since it started weighting regimes by observation count and summing. Treat it as documentation of an earlier design, not as a test."
+    },
+    "refresh": "git clone https://github.com/peernagy/lob_bench <tmp>; checkout the base commit; commit ours over it; git merge Sat-A main; resolve; copy the result here and update commit, tree_sha256 and file_count",
+    "portability": {
+      "why": "the upstream launcher scripts were written against fixed locations on the machines they ran on, so they do not run anywhere else as written",
+      "what": {
+        "shell scripts": "the checkout directory now comes from LOB_BENCH_DIR, spelled with :? so an unset variable stops the job instead of landing it in whatever directory it started from; the conda activation comes from CONDA_ACTIVATE with a $HOME default; #SBATCH --output/--error were made relative, since SLURM does not expand variables in those directives",
+        "data_loading.py": "the demo path in the __main__ block reads LOB_BENCH_DATA, defaulting to ./data_lob_bench/. That block is not executed on import; the accompanying `import os` is module-level and is, so this file is the one place the substitutions touch a line the scorer runs."
+      },
+      "consequence": "the tree is therefore not byte-identical to either side; tree_sha256 covers the tree as committed here, and re-deriving it from upstream means re-applying these substitutions"
+    }
+  }
+}

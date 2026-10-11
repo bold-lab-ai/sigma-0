@@ -1,0 +1,9 @@
+include: model_zoo_smoke_base.yaml
+name: model_zoo_smoke_mamba3
+architecture: mamba3
+sbatch_job_name: sigma0-smoke-mamba3
+env_ARCHITECTURE: mamba3
+env_MAMBA3_D_STATE: 16
+env_MAMBA3_EXPAND: 2
+env_MAMBA3_HEADDIM: 16
+env_MAMBA3_CHUNK_SIZE: 16

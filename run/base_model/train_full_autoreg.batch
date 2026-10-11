@@ -1,0 +1,773 @@
+#!/bin/bash
+# ============================================================
+# 📖 Read README.md  ->  section 'Model & Training Reference'
+#    architecture, loss math, distributed training, metrics.
+# ============================================================
+#SBATCH --job-name=sigma0-train
+#SBATCH --output=logs/train_%j.out
+#SBATCH --error=logs/train_%j.err
+# === 256-node production config ===
+#SBATCH --nodes=256
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:4
+#SBATCH --mem=0
+#SBATCH --time=23:59:00
+#SBATCH --exclude=nid[010696-010718],nid010152,nid010110,nid[011112-011115],nid011294,nid[010083-010086],nid[010561-010564],nid010655,nid010052,nid010442,nid010093,nid010990,nid010499,nid011290,nid011263,nid010993,nid[010226-010255],nid[010340-010347],nid010768,nid[010061-010062],nid[010550-010557]
+
+# Group-writable by default: new files/dirs (logs, checkpoints) are g+rw
+umask 002
+
+SCRIPT_PATH="${BASH_SOURCE[0]:-$0}"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+# Under sbatch, BASH_SOURCE points at the spool copy (/var/spool/slurmd/job<ID>/),
+# which does NOT contain node_wrapper.sh. Fall back to the submit-dir layout.
+if [ ! -f "$SCRIPT_DIR/node_wrapper.sh" ] && [ -n "${SLURM_SUBMIT_DIR:-}" ] \
+   && [ -f "$SLURM_SUBMIT_DIR/run/base_model/node_wrapper.sh" ]; then
+    SCRIPT_DIR="$SLURM_SUBMIT_DIR/run/base_model"
+fi
+export SCRIPT_DIR
+
+# --- 32-node full-day production submit command ---
+# sbatch --nodes=32 --time=23:59:00 train_full_autoreg.batch
+#
+# ============================================
+# LR Scaling Theory for Batch Size Changes
+# ============================================
+#
+# When scaling batch size by factor κ = new_BSZ / old_BSZ:
+#
+# (a) Linear Scaling (LR × κ) — for SGD
+#     Goyal et al. 2017, "Accurate, Large Minibatch SGD: Training ImageNet in 1 Hour"
+#     Ref: https://arxiv.org/abs/1706.02677
+#
+#     SGD update:  Δw = -LR × ∇L(w)
+#     Gradient noise:  Var(∇L) ∝ σ² / B
+#     When B × κ: gradient variance ÷ κ → LR must also × κ
+#     Applies to: SGD (with momentum), CV tasks, medium batch (8K-64K)
+#
+# (b) Square Root Scaling (LR × √κ) — for Adam/AdamW  ★ THIS PROJECT ★
+#     Hoffer et al. 2017; Krizhevsky 2014; Princeton SDE Framework 2024
+#     Ref: https://arxiv.org/abs/1705.03341
+#     Ref: https://www.cs.princeton.edu/~smalladi/blog/2024/01/22/SDEs-ScalingRules/
+#
+#     Adam update:  Δw = -LR × m̂ / (√v̂ + ε)
+#                              ↑ adaptive term already compensates noise
+#     Key difference:
+#       SGD:   noise → directly affects update direction & magnitude → full compensation → × κ
+#       Adam:  v̂ (2nd moment) already tracks gradient variance → only compensate "variance of variance" → × √κ
+#
+#     AED (Aligned Equation Derivation):
+#       Var(Adam_update) ∝ LR² × Var(m̂/(√v̂+ε))
+#                        ∝ LR² × 1/B     (approximation)
+#       To maintain Var constant:
+#         LR_new² / B_new = LR_old² / B_old
+#         LR_new = LR_old × √(B_new / B_old)
+#                = LR_old × √κ
+#
+#     2024 NeurIPS Surge Phenomenon (Ref: https://arxiv.org/abs/2405.14578):
+#       Adam's optimal LR is NOT monotonically increasing with batch size.
+#       Small→medium batch: LR ∝ √κ (growth phase)
+#       Medium→large batch: LR peaks then may decrease
+#       → Always do a sweep, don't blindly trust the formula.
+#
+# This project: AdamW optimizer (optax standard config), S5 SSM, 75M params
+#   Baseline:  BSZ=28  (7 GPU × 4/GPU),  LR=5e-4
+#   128 GPU:   BSZ=1536 (128 GPU × 12/GPU), κ=54.9, √κ=7.4 → LR≈3.7e-3
+#
+# ============================================
+#
+# ============================================
+# Muon LR Scaling with Sequence Length / Batch Size (2026-04-12)
+# ============================================
+#
+# Muon follows sqrt(B) scaling (same as AdamW), confirmed by:
+#   - Convergence analysis (arxiv 2507.01598)
+#   - Moonlight (arxiv 2502.16982): critical batch ~20M tokens
+#   - Essential AI (arxiv 2505.02222): muP transfer to 3.7B
+#
+# Sequence length acts as batch size multiplier: more tokens/step = larger effective batch.
+# Width scaling (muP) is built into Muon's Newton-Schulz (no LR adjustment needed for d_model).
+#
+# Formula:
+#   tokens_per_opt_step = K * gBSZ * msg_seq_len * 26
+#   LR_adjusted = LR_anchor * sqrt(tokens_anchor / tokens_per_opt_step)
+#
+# Anchor: Phase B s500 gBSZ=16 K=10 = 2.08M tokens/opt, LR=0.01
+#
+#   | Config               | K  | gBSZ | tokens/opt | sqrt factor | LR     |
+#   |----------------------|----|------|------------|-------------|--------|
+#   | s500  gBSZ=16        | 10 |  16  |    2.08M   |    1.00     | 0.0100 |
+#   | s2k   gBSZ=16        | 10 |  16  |    8.32M   |    0.50     | 0.0050 |
+#   | s2k   gBSZ=32        | 10 |  32  |   16.64M   |    0.35     | 0.0035 |
+#   | s4k   gBSZ=16        | 10 |  16  |   16.64M   |    0.35     | 0.0035 |
+#   | s4k   gBSZ=32        | 10 |  32  |   33.28M   |    0.25     | 0.0025 |
+#   | s4k   gBSZ=64 (prod) | 10 |  64  |   66.56M   |    0.18     | 0.0018 |
+#
+# CAVEAT: sqrt scaling is approximate. Allen AI (2024) found scaling is slower
+# than sqrt in practice. Always validate with a short run before committing
+# to long training. The Phase B s2k winner (WS-21=0.086) ran at 8.3M tokens/opt
+# with LR=0.01 (2x "too high" by this formula) and still gave the best result.
+#
+# ============================================
+#
+# --- ssm_lr_base sweep (32N, 80min, no curtail, normal training) ---
+# SSM_LR_BASE=1e-4  sbatch --nodes=32 --time=01:20:00 train_full_autoreg.batch
+# SSM_LR_BASE=3e-4  sbatch --nodes=32 --time=01:20:00 train_full_autoreg.batch
+# SSM_LR_BASE=5e-4  sbatch --nodes=32 --time=01:20:00 train_full_autoreg.batch  # current default ★
+# SSM_LR_BASE=1e-3  sbatch --nodes=32 --time=01:20:00 train_full_autoreg.batch  # argparse default
+# SSM_LR_BASE=2e-3  sbatch --nodes=32 --time=01:20:00 train_full_autoreg.batch
+# SSM_LR_BASE=5e-3  sbatch --nodes=32 --time=01:20:00 train_full_autoreg.batch
+# SSM_LR_BASE=1e-2  sbatch --nodes=32 --time=01:20:00 train_full_autoreg.batch
+
+# ============================================
+# Reproduce baseline_full_autoreg (GOOG 2022)
+# ============================================
+# Baseline branch: baseline_full_autoreg at commit 9386d01 (2026-01-27)
+# Original runs: twilight-sound-77 (bsz=28, 7GPU), sleek-night-72/robust-darkness-68 (bsz=32, 8GPU)
+# Original config: micro_bsz=4, ignore_times=False, ssm_lr_base=5e-4, epochs=40
+# Created: 2026-02-22
+#
+# PER_GPU_BSZ=1 IGNORE_TIMES=False EPOCHS=40 sbatch --nodes=8 --time=23:59:00 train_full_autoreg.batch
+#
+# ============================================
+# 75M Model Training Script (26 token mode)
+# ============================================
+# Branch: exp/B1-ignore-times (based on baseline_full_autoreg)
+# Experiment: B1 — ignore_times=True baseline
+# Data: GOOG 2018-2022 + JAN2023 (combined)
+#
+# Usage:
+#   # Batch size sweep (single node)
+#   for micro_bsz in 1 2 4 8 12 16; do
+#       PER_GPU_BSZ=$micro_bsz CURTAIL_EPOCHS=10 sbatch train_full_autoreg.batch
+#   done
+#
+#   # Full training (8 nodes) - update --nodes=8 first
+#   PER_GPU_BSZ=<optimal> sbatch train_full_autoreg.batch
+# ============================================
+
+# ============================================
+# Muon Optimizer (Newton-Schulz for 2D kernel weights)
+# ============================================
+# Routes: SSM params -> Adam, 2D kernels -> Muon NS, rest -> AdamW
+# Paper default: MUON_LR=0.02, WEIGHT_DECAY=0.01 (for <500M models)
+#
+# Quick test (2N, 30min, 75M):
+#   OPT_CONFIG=muon MUON_LR=0.02 WEIGHT_DECAY=0.01 \
+#     D_MODEL=1024 N_LAYERS=12 BLOCKS=16 SSM_SIZE_BASE=1024 PER_GPU_BSZ=10 \
+#     CURTAIL_EPOCHS=300 IGNORE_TIMES=True \
+#     sbatch --nodes=2 --time=00:30:00 --job-name=muon-75m-2n-30m train_full_autoreg.batch
+#
+# Full training (32N, 24h, 75M):
+#   OPT_CONFIG=muon MUON_LR=0.02 WEIGHT_DECAY=0.01 \
+#     D_MODEL=1024 N_LAYERS=12 BLOCKS=16 SSM_SIZE_BASE=1024 PER_GPU_BSZ=10 \
+#     IGNORE_TIMES=True EPOCHS=40 \
+#     sbatch --nodes=32 --time=23:59:00 --job-name=muon-75m-32n-24h train_full_autoreg.batch
+
+# Default per-GPU batch size — set in model config section below
+# (can be overridden via environment variable: PER_GPU_BSZ=N sbatch ...)
+# NOTE: do NOT set a default here — model config section handles it
+# (75M: BSZ=10, 360M: BSZ=2)
+
+# Token encoding: 26tok ONLY (base-1000 price, base-100 size, vocab=2112)
+# The codebase runs ONLY in 26tok mode (lossless encoding of price and size).
+#
+# Token layout:
+#   26tok: [evt:0, dir:1, price:2-4, size:5-6, dt_s:7, dt_ns:8-10, time_s:11-12, time_ns:13-15,
+#           price_ref:16-18, size_ref:19-20, time_s_ref:21-22, time_ns_ref:23-25]
+#
+# For legacy 22tok and 24tok layouts and documentation, see the appendix at the bottom of this file.
+
+# The node wrapper validates the tokenizer after activating the configured
+# Python environment and adding this repository's src/ directory to PYTHONPATH.
+
+# Multi-node: default to hierarchical shard_map (2D mesh)
+# Hierarchical splits allreduce into NVLink (intra-node) + Slingshot (inter-node)
+# Without it, 32N is 2.18x slower (2.05 vs 0.94 s/step) due to flat 128-GPU ring
+# Job 2426414: forgot HIERARCHICAL=True → 1D flat mesh → 2.05 s/step (should be 0.94)
+if [ "${SLURM_NNODES:-1}" -ge 2 ]; then
+  export HIERARCHICAL=${HIERARCHICAL:-True}
+fi
+
+
+echo "============================================"
+echo "Job started at: $(date)"
+echo "Job ID: $SLURM_JOB_ID"
+echo "Running on nodes: $SLURM_JOB_NODELIST"
+echo "Number of nodes: $SLURM_NNODES"
+echo "GPUs per node: 4"
+echo "Total GPUs: $((SLURM_NNODES * 4))"
+echo "============================================"
+
+# ============================================
+# Model Configuration
+# ============================================
+# Canonical selector.  SSM_TYPE remains a launch-time alias for archived
+# commands, but only ARCHITECTURE is forwarded to Python.
+export ARCHITECTURE=${ARCHITECTURE:-${SSM_TYPE:-mamba3}}
+case "$ARCHITECTURE" in
+    mamba3|hybrid_mamba3|s5|gdn|kda|transformer|nsa) ;;
+    mamba2)
+        echo "ERROR: mamba2 is intentionally excluded; use ARCHITECTURE=mamba3."
+        exit 2
+        ;;
+    *)
+        echo "ERROR: Unknown ARCHITECTURE='$ARCHITECTURE'."
+        exit 2
+        ;;
+esac
+# Default launcher preset remains 360M for historical non-Mamba3 runs, but
+# Mamba3 submissions must be explicit to avoid silently falling back to 360M.
+# Use either:
+#   MODEL_PRESET=75m|360m
+# or set all of:
+#   D_MODEL N_LAYERS BLOCKS SSM_SIZE_BASE PER_GPU_BSZ
+#
+# 75M:  D_MODEL=1024, N_LAYERS=6, BLOCKS=16, SSM_SIZE_BASE=1024, PER_GPU_BSZ=10
+# 360M: D_MODEL=2048, N_LAYERS=24, BLOCKS=32, SSM_SIZE_BASE=2048, PER_GPU_BSZ=2
+MODEL_PRESET=${MODEL_PRESET:-}
+case "${MODEL_PRESET,,}" in
+    ""|"360m"|"360")
+        DEFAULT_MODEL_LABEL="360M"
+        DEFAULT_D_MODEL=2048
+        DEFAULT_N_LAYERS=24
+        DEFAULT_BLOCKS=32
+        DEFAULT_SSM_SIZE_BASE=2048
+        DEFAULT_PER_GPU_BSZ=2
+        ;;
+    "75m"|"75")
+        DEFAULT_MODEL_LABEL="75M"
+        DEFAULT_D_MODEL=1024
+        DEFAULT_N_LAYERS=6
+        DEFAULT_BLOCKS=16
+        DEFAULT_SSM_SIZE_BASE=1024
+        DEFAULT_PER_GPU_BSZ=10
+        ;;
+    *)
+        echo "ERROR: Unknown MODEL_PRESET='${MODEL_PRESET}'. Use 75m or 360m."
+        exit 2
+        ;;
+esac
+
+# Matches the whole mamba3 family, not the literal string: a gate that keys on
+# one exact name lets every newly registered backbone fall through to the 360M
+# defaults silently, which is the exact failure this gate exists to prevent.
+if [[ "$ARCHITECTURE" == "mamba3" || "$ARCHITECTURE" == "hybrid_mamba3" ]] && [ -z "${MODEL_PRESET:-}" ]; then
+    missing_model_vars=()
+    [ -z "${D_MODEL:-}" ] && missing_model_vars+=(D_MODEL)
+    [ -z "${N_LAYERS:-}" ] && missing_model_vars+=(N_LAYERS)
+    [ -z "${BLOCKS:-}" ] && missing_model_vars+=(BLOCKS)
+    [ -z "${SSM_SIZE_BASE:-}" ] && missing_model_vars+=(SSM_SIZE_BASE)
+    [ -z "${PER_GPU_BSZ:-}" ] && missing_model_vars+=(PER_GPU_BSZ)
+    if [ "${#missing_model_vars[@]}" -gt 0 ]; then
+        echo "ERROR: Refusing ambiguous Mamba3 launch with implicit model defaults."
+        echo "Missing model vars: ${missing_model_vars[*]}"
+        echo "Set MODEL_PRESET=75m|360m or provide all of:"
+        echo "  D_MODEL N_LAYERS BLOCKS SSM_SIZE_BASE PER_GPU_BSZ"
+        echo "Example:"
+        echo "  ARCHITECTURE=mamba3 MODEL_PRESET=75m sbatch ..."
+        exit 2
+    fi
+fi
+
+export D_MODEL=${D_MODEL:-$DEFAULT_D_MODEL}
+export N_LAYERS=${N_LAYERS:-$DEFAULT_N_LAYERS}
+export BLOCKS=${BLOCKS:-$DEFAULT_BLOCKS}
+export SSM_SIZE_BASE=${SSM_SIZE_BASE:-$DEFAULT_SSM_SIZE_BASE}
+export PER_GPU_BSZ=${PER_GPU_BSZ:-$DEFAULT_PER_GPU_BSZ}
+export SSM_LR_BASE=${SSM_LR_BASE:-5e-4}
+export LR_FACTOR=${LR_FACTOR:-1}
+export WARMUP_END=${WARMUP_END:-0.01}
+export OPT_CONFIG=${OPT_CONFIG:-standard}
+# Muon needs WD=0.005 (not AdamW's 0.05) — mismatch causes NCCL deadlock within hundreds of steps.
+if [ "$OPT_CONFIG" = "muon" ]; then
+    export WEIGHT_DECAY=${WEIGHT_DECAY:-0.005}
+    export MUON_LR=${MUON_LR:-0.02}
+    export MUON_WD=${MUON_WD:-}  # defaults to WEIGHT_DECAY in Python if unset
+else
+    export WEIGHT_DECAY=${WEIGHT_DECAY:-0.05}
+fi
+
+echo "[*] Model config: ${DEFAULT_MODEL_LABEL} (${TOKEN_MODE:-26tok}, padded_large)"
+echo "    d_model=$D_MODEL, n_layers=$N_LAYERS, blocks=$BLOCKS"
+echo "    ssm_size_base=$SSM_SIZE_BASE, ssm_lr_base=$SSM_LR_BASE"
+echo "    per_gpu_bsz=$PER_GPU_BSZ, opt_config=$OPT_CONFIG, architecture=$ARCHITECTURE, model_preset=${MODEL_PRESET:-<implicit>}"
+if [ "$OPT_CONFIG" = "muon" ]; then
+    echo "    muon_lr=$MUON_LR, weight_decay=$WEIGHT_DECAY"
+fi
+
+# XLA thunk init timeout for large models (360M+)
+# 128 GPUs: thunk initialization can exceed default 30s, GPU 3 (last NCCL channel) gets SIGABRT
+# CAVEAT: --xla_gpu_executable_terminate_timeout_seconds does NOT exist in JAX 0.9.0.1 (Job 2476156).
+# The correct flag is --xla_gpu_first_collective_call_terminate_timeout_seconds (from G11).
+# This is set in node_wrapper.sh XLA_FLAGS block (600s, applies to all models).
+
+# REMAT: Activation checkpointing (remat) to reduce peak activation memory.
+# Enables per-layer recomputation during backward pass. ~30% slower, ~Lx less memory.
+REMAT=${REMAT:-0}
+export REMAT
+if [ "$REMAT" = "1" ]; then
+    echo "[*] Activation checkpointing (remat) ENABLED"
+    if [ -n "${REMAT_POLICY:-}" ]; then
+        export REMAT_POLICY
+        echo "    Policy: $REMAT_POLICY"
+    fi
+fi
+
+# TP_SIZE: Tensor parallelism — split heads across intra-node GPUs.
+# 1=pure DP (default). 4=all 4 GPUs do head-parallel TP within node.
+TP_SIZE=${TP_SIZE:-1}
+export TP_SIZE
+if [ "$TP_SIZE" -gt 1 ]; then
+    echo "[*] Tensor parallelism: TP_SIZE=$TP_SIZE (head-parallel within node)"
+fi
+
+# CURTAIL_EPOCHS: Optional - end each epoch early after N steps (for quick testing)
+if [ -n "$CURTAIL_EPOCHS" ]; then
+    echo "[*] Curtail epochs: $CURTAIL_EPOCHS steps (quick test mode)"
+    export CURTAIL_EPOCHS
+fi
+
+# Held-out validation split: default 0.1% (0.001) of training files for in-distribution validation.
+VAL_SPLIT=${VAL_SPLIT:-0.001}
+export VAL_SPLIT
+echo "[*] val_split=$VAL_SPLIT, test_split=0.0"
+
+# Mini-epochs: split each data epoch into K sub-epochs for frequent eval
+# Default 40: with 1 data epoch, get 40 eval points for LR/loss curve visibility
+MINI_EPOCHS=${MINI_EPOCHS:-1}
+export MINI_EPOCHS
+if [ "$MINI_EPOCHS" -gt 1 ]; then
+    echo "[*] Mini-epochs: $MINI_EPOCHS per data epoch"
+fi
+
+# Local Steps: sync params across nodes every K steps (DiLoCo-style).
+# The current implementation buffers K batches and executes them inside one
+# lax.scan, with intra-node gradient pmean per step and exactly one cross-node
+# parameter synchronization after the scan. The older lax.cond warning that
+# claimed pmean(params) ran every step no longer applies to this code path.
+LOCAL_STEPS_K=${LOCAL_STEPS_K:-0}
+export LOCAL_STEPS_K
+
+# DiLoCo outer optimizer: 'none' (naive FedAvg, default) or 'nesterov'.
+# When 'nesterov', params sync replaced by pseudo-grad + Nesterov outer step
+# (Douillard et al. 2024, DiLoCo paper Table 1 defaults: lr=0.7, beta=0.9).
+DILOCO_OUTER=${DILOCO_OUTER:-none}
+DILOCO_OUTER_LR=${DILOCO_OUTER_LR:-0.7}
+DILOCO_OUTER_MOMENTUM=${DILOCO_OUTER_MOMENTUM:-0.9}
+export DILOCO_OUTER DILOCO_OUTER_LR DILOCO_OUTER_MOMENTUM
+
+# Cosine LR period override: decouple cosine decay from dataset epoch length.
+# Default 0 = use dataset epoch (848k steps). Set to actual training budget
+# so LR decays meaningfully (e.g. COSINE_STEPS=200000 for ~200k-step runs).
+# Chinchilla convention: cosine period = compute budget, not dataset size.
+export COSINE_STEPS=${COSINE_STEPS:-0}
+
+# Gradient Accumulation: accumulate K micro-batches before cross-node AllReduce.
+# Effective BSZ = micro_bsz * gpus_per_node * nodes * GRAD_ACCUM_STEPS.
+# Use to match large-cluster BSZ with fewer nodes (e.g. 128N K=4 ≈ 512N K=1).
+# Mutually exclusive with LOCAL_STEPS_K>0.
+GRAD_ACCUM_STEPS=${GRAD_ACCUM_STEPS:-1}
+export GRAD_ACCUM_STEPS
+if [ "$GRAD_ACCUM_STEPS" -gt 1 ]; then
+    echo "[*] Gradient accumulation: K=$GRAD_ACCUM_STEPS (effective BSZ = $((PER_GPU_BSZ * GPUS_PER_NODE * SLURM_NNODES * GRAD_ACCUM_STEPS)))"
+fi
+
+# Context length: number of orders per sample (G21 experiment)
+MSG_SEQ_LEN=${MSG_SEQ_LEN:-500}
+export MSG_SEQ_LEN
+
+# Token encoding mode. lob.encoding is a runtime selector, so the encodings other
+# than 26tok are reachable now; the refusal that used to stand here was written
+# when every value routed to the same code and so described the code rather than
+# a constraint.
+TOKEN_MODE=${TOKEN_MODE:-26tok}
+export TOKEN_MODE
+case "$TOKEN_MODE" in
+    22tok) TOKENS_PER_MSG=22 ;;
+    23tok) TOKENS_PER_MSG=23 ;;
+    24tok) TOKENS_PER_MSG=24 ;;
+    26tok) TOKENS_PER_MSG=26 ;;
+    *) echo "ERROR: unknown TOKEN_MODE=$TOKEN_MODE (want 22tok|23tok|24tok|26tok)" >&2; exit 1 ;;
+esac
+# The number above is only used for the context-length arithmetic printed below
+# and for shell-side sizing; the model reads it from the encoding itself. Assert
+# they agree rather than trusting two sources for one number.
+_tpm_check=$(PYTHONPATH=src python -c "
+from base_model.encoding.encoding import set_token_mode, Message_Tokenizer
+set_token_mode('$TOKEN_MODE'); print(int(Message_Tokenizer.MSG_LEN))" 2>/dev/null)
+if [ -n "$_tpm_check" ] && [ "$_tpm_check" != "$TOKENS_PER_MSG" ]; then
+    echo "ERROR: TOKEN_MODE=$TOKEN_MODE gives $_tpm_check tokens/message, batch script says $TOKENS_PER_MSG" >&2
+    exit 1
+fi
+echo "[*] token_mode: $TOKEN_MODE ($TOKENS_PER_MSG tokens/msg, context=$((MSG_SEQ_LEN * TOKENS_PER_MSG)) tokens)"
+
+# Mid-epoch checkpoint: save every N steps or "auto" (30min time-based)
+CHECKPOINT_EVERY=${CHECKPOINT_EVERY:-"auto"}
+if [ -z "${MAX_JOB_HOURS:-}" ]; then
+    _WALL_LIMIT="${SBATCH_TIMELIMIT:-${SLURM_TIMELIMIT:-23:59:00}}"
+    MAX_JOB_HOURS=$(awk -v t="${_WALL_LIMIT}" 'BEGIN {
+        days = 0
+        rest = t
+        if (index(t, "-") > 0) {
+            split(t, d, "-")
+            days = d[1] + 0
+            rest = d[2]
+        }
+        if (rest ~ /^[0-9]+$/) {
+            h = (rest + 0) / 60.0
+        } else {
+            n = split(rest, a, ":")
+            if (n == 3) h = a[1] + a[2] / 60.0 + a[3] / 3600.0
+            else if (n == 2) h = a[1] + a[2] / 60.0
+            else h = 23.9833
+        }
+        h += days * 24.0
+        m = h - 0.5
+        if (m < 0.5) m = 0.5
+        printf "%.2f", m
+    }')
+fi
+export CHECKPOINT_EVERY MAX_JOB_HOURS
+echo "[*] Mid-epoch checkpoint: every=$CHECKPOINT_EVERY, max_job_hours=$MAX_JOB_HOURS"
+
+# Restore from mid-epoch checkpoint
+if [ -n "$RESTORE_PATH" ]; then
+    echo "[*] Restore from: $RESTORE_PATH (step=${RESTORE_STEP:-latest})"
+fi
+if [ -n "$RESUME_FROM_STEP" ]; then
+    echo "[*] Resume from batch_idx=$RESUME_FROM_STEP within epoch"
+fi
+
+# Create logs directory (NODE_LOG_DIR allows override for permission issues)
+export NODE_LOG_DIR="${NODE_LOG_DIR:-${SLURM_SUBMIT_DIR:-.}/logs}"
+mkdir -p "$NODE_LOG_DIR"
+
+# Change to working directory (WORKDIR allows git worktree experiments)
+WORKDIR="${WORKDIR:-${SLURM_SUBMIT_DIR:-$PWD}}"
+export WORKDIR
+cd "$WORKDIR"
+
+# Configuration
+export GPUS_PER_NODE=${GPUS_PER_NODE:-4}
+NNODES=$SLURM_NNODES
+export NNODES  # Must export for bash -c wrapper to see it
+TOTAL_GPUS=$((GPUS_PER_NODE * NNODES))
+
+# Calculate batch sizes
+GLOBAL_BSZ=$((PER_GPU_BSZ * TOTAL_GPUS))
+# Each node-process loads data for all its GPUs
+PER_PROCESS_BSZ=$((PER_GPU_BSZ * GPUS_PER_NODE))
+
+echo "[*] Per GPU batch size: $PER_GPU_BSZ"
+echo "[*] Total GPUs: $TOTAL_GPUS ($NNODES nodes × $GPUS_PER_NODE GPUs/node)"
+echo "[*] Global batch size: $GLOBAL_BSZ (per-process: $PER_PROCESS_BSZ)"
+
+# Multi-Node Distributed Training (JAX distributed + pmap cross-node pmean)
+MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n1)
+MASTER_PORT=29500
+export JAX_COORDINATOR_ADDRESS="$MASTER_ADDR:$MASTER_PORT"
+# 64N+: coordinator must wait longer for 256-2048 processes to join
+if [ "${SLURM_NNODES:-1}" -ge 64 ]; then
+  export JAX_COORDINATOR_TIMEOUT_MS=1800000   # 30 min (NCCL comm init at 2048 GPUs can take 10-30 min)
+  # KV timeout: per-key exchange during topology discovery (default 2min)
+  # Job 2477345 (512N): "GetKeyValue() timed out with key: cuda:local_topology/cuda/196 and duration: 2m"
+  # 512 processes hammering the KV store + staggered SLURM launch → 2min too tight
+  export JAX_COORDINATOR_KV_TIMEOUT=600       # 10 min (default 120s)
+else
+  export JAX_COORDINATOR_TIMEOUT_MS=600000    # 10 min (sufficient for ≤64N)
+fi
+echo "[*] Multi-node DDP: $NNODES nodes, coordinator=$JAX_COORDINATOR_ADDRESS, timeout=${JAX_COORDINATOR_TIMEOUT_MS}ms, kv_timeout=${JAX_COORDINATOR_KV_TIMEOUT:-120}s"
+
+# Data paths
+# Default: 8 tickers × 4 years (multi-ticker mode)
+# Override: TICKERS="" (empty) for single-ticker GOOG 2022 fallback
+export TICKERS="${TICKERS:-GOOG,AAPL,NVDA,AMZN,META,TSLA,MSFT,AMD}"
+# DATA_ROOT: 26tok and non-26tok now share /lus/.../lob_preproc.
+# The 26tok encoding is applied at dataloader-time, not stored on disk,
+# so the prior `lob_preproc_26tok` separate dir was redundant and has
+# been consolidated. Override via DATA_ROOT=... if needed.
+if [ -z "${DATA_ROOT}" ]; then
+  export DATA_ROOT="/path/to/projects/lob_preproc"
+else
+  export DATA_ROOT
+fi
+export TRAIN_DATE_RANGE="${TRAIN_DATE_RANGE:-2022-01-01,2025-12-31}"
+export TEST_DATE_RANGE="${TEST_DATE_RANGE-2026-01-01,2026-01-31}"
+
+if [ -n "${TICKERS}" ]; then
+  export DATA_DIR="${DATA_ROOT}"  # dir_name still needed as base path
+  # Count tickers
+  N_TICKERS=$(echo "$TICKERS" | tr ',' '\n' | wc -l)
+  echo "[*] Multi-ticker mode: ${N_TICKERS} tickers × 4 years"
+  echo "    TICKERS=$TICKERS"
+  echo "    DATA_ROOT=$DATA_ROOT"
+  echo "    TRAIN_DATE_RANGE=$TRAIN_DATE_RANGE"
+  echo "    TEST_DATE_RANGE=$TEST_DATE_RANGE"
+else
+  # Single-ticker fallback: GOOG 2022 train + Jan 2023 test
+  export DATA_DIR="/path/to/home/user/GOOG_GOOGL_2016TO2021_24tok_preproc/GOOG/2022"
+  export TEST_DIR="/path/to/data/JAN2023/GOOG_24tok_preproc"
+  echo "[*] Single-ticker mode: GOOG 2022 train + Jan 2023 test"
+  echo "[*] Train data: $DATA_DIR"
+  echo "[*] Test data: $TEST_DIR"
+fi
+
+# ============================================================================
+# Priority Chain: DISABLED — block-commented for future use
+# ============================================================================
+# Pre-submit backup jobs with --dependency=afternotok so they accumulate SLURM
+# age priority while the main job runs. If main succeeds, SLURM auto-cancels
+# backups (afternotok not met). If main fails, backups are already high-priority.
+# CAVEAT: disabled because backup jobs can pile up and consume scheduling slots
+# when failures are frequent. Re-enable by uncommenting below.
+#
+# PRIORITY_CHAIN_LENGTH=${PRIORITY_CHAIN_LENGTH:-3}
+# PRIORITY_CHAIN_DEPTH=${PRIORITY_CHAIN_DEPTH:-0}
+#
+# if [ "$PRIORITY_CHAIN_DEPTH" -eq 0 ] && [ -z "${CURTAIL_EPOCHS:-}" ] && [ "$PRIORITY_CHAIN_LENGTH" -gt 0 ]; then
+#     echo "[Priority Chain] Creating $PRIORITY_CHAIN_LENGTH backup jobs with afternotok dependency..."
+#     PREV_ID=$SLURM_JOB_ID
+#     for i in $(seq 1 $PRIORITY_CHAIN_LENGTH); do
+#         BACKUP_ID=$(PRIORITY_CHAIN_DEPTH=$i \
+#             sbatch --parsable \
+#                    --dependency=afternotok:${PREV_ID} \
+#                    --nodes=${SLURM_NNODES} \
+#                    --time=${SBATCH_TIMELIMIT:-23:59:00} \
+#                    --job-name="${SLURM_JOB_NAME:-backup}-r${i}" \
+#                    "$0" 2>/dev/null) || true
+#         if [ -n "$BACKUP_ID" ]; then
+#             echo "[Priority Chain] Backup $i/$PRIORITY_CHAIN_LENGTH: job $BACKUP_ID (afternotok:$PREV_ID)"
+#             PREV_ID=$BACKUP_ID
+#         else
+#             echo "[Priority Chain] WARNING: Failed to submit backup $i"
+#         fi
+#     done
+# elif [ "$PRIORITY_CHAIN_DEPTH" -gt 0 ]; then
+#     echo "[Priority Chain] This is backup #${PRIORITY_CHAIN_DEPTH} in chain."
+# fi
+
+# Launch with srun (1 process per node, each managing GPUS_PER_NODE GPUs)
+# --kill-on-bad-exit=1: if ANY rank exits non-zero, srun kills ALL ranks immediately.
+# Without this, a watchdog-killed rank leaves 127 others stuck in NCCL wait forever.
+# External wrapper: inline bash -c overflows srun IO buffer at 32N (13KB * 32 tasks).
+# NOTE: no --output flag — per-node srun output also causes "Slurmd could not connect IO".
+# All training output goes to wandb + main sbatch log.
+# Determine gpu-bind format based on GPUS_PER_NODE
+if [ "$GPUS_PER_NODE" -eq 1 ]; then
+    GPU_BIND="map_gpu:0"
+elif [ "$GPUS_PER_NODE" -eq 2 ]; then
+    GPU_BIND="map_gpu:0,1"
+else
+    GPU_BIND="map_gpu:0,1,2,3"
+fi
+
+# Partial-node allocations: a GH200 node is 4 independent superchips, each GPU
+# sitting on its own NUMA domain of 72 cores. With --gres=gpu:N (N<4) Slurm may
+# hand out, say, physical GPU 2 (cores 144-215) while allocating cores 0-71.
+# --gpu-bind then demands that GPU's NUMA cores, which fall outside the step
+# allocation, and the launch dies with
+#     "CPU binding outside of job step allocation ... Unable to satisfy cpu bind"
+# (observed on job 5856631). Full-node jobs own every core, so they are
+# unaffected and keep the binding. GPU_BIND_OVERRIDE forces a value either way.
+CPU_BIND=""
+if [ -n "${GPU_BIND_OVERRIDE+x}" ]; then
+    GPU_BIND="$GPU_BIND_OVERRIDE"
+elif [ "$GPUS_PER_NODE" -lt 4 ]; then
+    # Dropping --gpu-bind alone is NOT enough (job 5856657 still failed): with
+    # --gres on the step, Slurm's task/affinity plugin still derives a mask from
+    # the GPU's NUMA domain. CPU and GPU allocations are not guaranteed to be
+    # NUMA-aligned on a partial-node request -- 5856631 got cores 0-71 and
+    # 5856657 got cores 144-215, and both times the derived mask fell outside.
+    # --cpu-bind=none removes the request entirely, so no subset check runs.
+    # One task per node on a single GPU does not need affinity anyway.
+    echo "[*] Partial-node allocation (${GPUS_PER_NODE}/4 GPU): --gpu-bind off, --cpu-bind=none"
+    GPU_BIND=""
+    CPU_BIND="none"
+fi
+CPU_BIND="${CPU_BIND_OVERRIDE:-$CPU_BIND}"
+
+srun --nodes=$NNODES \
+     --ntasks=$NNODES \
+     --ntasks-per-node=1 \
+     --gres=gpu:$GPUS_PER_NODE \
+     ${GPU_BIND:+--gpu-bind=$GPU_BIND} \
+     ${CPU_BIND:+--cpu-bind=$CPU_BIND} \
+     --kill-on-bad-exit=1 \
+     --export=ALL \
+     bash "$SCRIPT_DIR/node_wrapper.sh"
+
+
+SRUN_EXIT=$?
+echo "============================================"
+echo "Training finished at: $(date)"
+echo "srun exit code: $SRUN_EXIT"
+echo "============================================"
+
+# Auto-resume on watchdog kill, NCCL deadlock, OR graceful timeout save.
+# Exit codes: 0=success/timeout-save, 1=watchdog kill, 126=NCCL error, 137=SIGKILL.
+# Scaling-law production runs use CURTAIL_EPOCHS as the target step, so they
+# must still auto-resume; the target-step guard below prevents completion loops.
+if [ -z "${NO_AUTO_RESUME:-}" ]; then
+  # Find latest checkpoint directory
+  # Checkpoint layout: $WORKDIR/checkpoints/j<JOBID>_<WANDB>_<JOBID>/<step>/
+  # Each step subdir contains the orbax checkpoint for that training step.
+  CKPT_BASE="$WORKDIR/checkpoints"
+  if [ -d "$CKPT_BASE" ]; then
+    # Find this job's checkpoint dir (j<SLURM_JOB_ID>_*)
+    JOB_CKPT_DIR=$(lfs find --maxdepth 1 --name "j${SLURM_JOB_ID}_*" "$CKPT_BASE" 2>/dev/null | head -1 || true)
+    # --- Determine RESUME_RESTORE_PATH and RESUME_STEP for resubmission ---
+    RESUME_RESTORE_PATH=""
+    RESUME_RESTORE_STEP=""
+    RESUME_STEP=""
+    CURTAIL_DONE=0
+
+    if [ -n "$JOB_CKPT_DIR" ] && [ -d "$JOB_CKPT_DIR" ]; then
+      LATEST_STEP=$(lfs find --maxdepth 1 "$JOB_CKPT_DIR" 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+$/ { if ($NF + 0 > max) max = $NF + 0 } END { if (max != "") print max }')
+      if [ -n "$LATEST_STEP" ]; then
+        # This job saved a checkpoint — use it
+        RESUME_RESTORE_PATH="$JOB_CKPT_DIR"
+        RESUME_RESTORE_STEP="$LATEST_STEP"
+        echo "[Auto-Resume] srun exit=$SRUN_EXIT. Latest checkpoint: $JOB_CKPT_DIR step $LATEST_STEP"
+        if [ -n "${CURTAIL_EPOCHS:-}" ] && [ "$LATEST_STEP" -ge "$CURTAIL_EPOCHS" ]; then
+          CURTAIL_DONE=1
+          echo "[Auto-Resume] Reached CURTAIL_EPOCHS target ($LATEST_STEP >= $CURTAIL_EPOCHS); no resubmit needed."
+        fi
+
+        # Extract step_in_epoch from checkpoint metadata for mid-epoch resume.
+        # Adjusts for BSZ change when node count differs between checkpoint and resubmit.
+        METADATA_FILE="$JOB_CKPT_DIR/$LATEST_STEP/metadata/metadata"
+        if [ -f "$METADATA_FILE" ]; then
+          RESUME_STEP=$(python3 -c "
+import json, os
+with open('$METADATA_FILE') as f:
+    d = json.load(f)
+step = d.get('metrics', {}).get('step_in_epoch')
+latest_step = int('$LATEST_STEP')
+if step is None or (step == 0 and latest_step > 0):
+    exit()  # epoch-end or restore-warm checkpoint; train.py infers from state.step
+resume = step + 1
+ckpt_pc = d.get('config', {}).get('process_count')
+new_pc = int(os.environ.get('SLURM_NNODES', 0))
+gpus = int(os.environ.get('GPUS_PER_NODE', 4))
+bsz = int(os.environ.get('PER_GPU_BSZ', 2))
+# BSZ adjustment: map sample position across node count changes
+if ckpt_pc and new_pc and ckpt_pc != new_pc:
+    old_global = ckpt_pc * gpus * bsz
+    new_global = new_pc * gpus * bsz
+    resume = resume * old_global // new_global
+# K-align: ensure resume starts at a grad_accum boundary
+K = int(os.environ.get('GRAD_ACCUM_STEPS', 1))
+if K > 1:
+    resume = ((resume + K - 1) // K) * K
+print(resume)
+" 2>/dev/null)
+          if [ -n "$RESUME_STEP" ]; then
+            echo "[Auto-Resume] RESUME_FROM_STEP=$RESUME_STEP (from metadata step_in_epoch, BSZ-adjusted)"
+          fi
+        fi
+      else
+        echo "[Auto-Resume] No step checkpoints found in $JOB_CKPT_DIR."
+      fi
+    fi
+
+    # Fallback: no new checkpoint saved — re-use the RESTORE_PATH passed to this job
+    if [ -z "$RESUME_RESTORE_PATH" ] && [ -n "${RESTORE_PATH:-}" ]; then
+      RESUME_RESTORE_PATH="$RESTORE_PATH"
+      RESUME_RESTORE_STEP="${RESTORE_STEP:-}"
+      # Re-use the original RESUME_FROM_STEP (still in env from submission)
+      RESUME_STEP="${RESUME_FROM_STEP:-}"
+      echo "[Auto-Resume] No new checkpoint. Falling back to original RESTORE_PATH=$RESTORE_PATH RESUME_FROM_STEP=${RESUME_STEP:-<unset>}"
+    fi
+
+    # --- Resubmit if we have a restore path ---
+    # On clean exit (0): only resubmit if RESUME_STEP is set (mid-epoch timeout save).
+    # On non-zero exit (crash): resubmit even without RESUME_STEP (fall back to restore).
+    if [ "$CURTAIL_DONE" -ne 1 ] && [ -n "$RESUME_RESTORE_PATH" ] && { [ -n "$RESUME_STEP" ] || [ "$SRUN_EXIT" -ne 0 ]; }; then
+      NEXT_DEPTH=$((${NO_AUTO_RESUME_DEPTH:-0} + 1))
+      if [ "$NEXT_DEPTH" -gt 20 ]; then
+        echo "[Auto-Resume] WARNING: Reached 20 consecutive auto-resumes. Stopping to prevent infinite loop."
+      else
+        if [ -n "$RESUME_STEP" ]; then
+          export RESUME_FROM_STEP="$RESUME_STEP"
+        fi
+
+        # Strip any existing -resume* suffix, then append -resume<N>
+        _BASE_NAME=$(echo "${SLURM_JOB_NAME:-sigma0-train}" | sed 's/-resume[0-9]*$//')
+        # Propagate all model/training config env vars to resumed job.
+        # NOTE: all vars must be unconditional assignments (VAR=val, not ${VAR:+VAR=val})
+        # because bash resolves assignment syntax BEFORE parameter expansion.
+        RESTORE_PATH="$RESUME_RESTORE_PATH" RESTORE_STEP="$RESUME_RESTORE_STEP" \
+          RESTORE_RESET_SCHEDULE="${RESTORE_RESET_SCHEDULE:-False}" \
+          NO_AUTO_RESUME_DEPTH=$NEXT_DEPTH \
+          ENABLE_DMON="${ENABLE_DMON:-0}" \
+          EPOCHS="${EPOCHS:-1}" MINI_EPOCHS="${MINI_EPOCHS:-1}" \
+          CURTAIL_EPOCHS="${CURTAIL_EPOCHS:-}" \
+          COSINE_STEPS="${COSINE_STEPS:-0}" \
+          CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-auto}" MAX_JOB_HOURS="${MAX_JOB_HOURS:-23.5}" \
+          DISABLE_STEP_WATCHDOG="${DISABLE_STEP_WATCHDOG:-0}" \
+          WATCHDOG_TIMEOUT="${WATCHDOG_TIMEOUT:-900}" STEP_TIMEOUT="${STEP_TIMEOUT:-300}" \
+          MSG_SEQ_LEN="${MSG_SEQ_LEN:-500}" N_DATA_WORKERS="${N_DATA_WORKERS:-12}" \
+          GPUS_PER_NODE="${GPUS_PER_NODE:-4}" TP_SIZE="${TP_SIZE:-1}" \
+          GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-1}" HIERARCHICAL="${HIERARCHICAL:-True}" \
+          MODEL_PRESET="${MODEL_PRESET:-}" REMAT="${REMAT:-0}" \
+          D_MODEL="$D_MODEL" N_LAYERS="$N_LAYERS" BLOCKS="$BLOCKS" \
+          SSM_SIZE_BASE="$SSM_SIZE_BASE" PER_GPU_BSZ="$PER_GPU_BSZ" \
+          SSM_LR_BASE="${SSM_LR_BASE:-}" LR_FACTOR="${LR_FACTOR:-1}" WARMUP_END="${WARMUP_END:-0.01}" \
+          OPT_CONFIG="$OPT_CONFIG" WEIGHT_DECAY="$WEIGHT_DECAY" \
+          MUON_LR="${MUON_LR:-}" MUON_WD="${MUON_WD:-}" \
+          ARCHITECTURE="$ARCHITECTURE" TOKEN_MODE="$TOKEN_MODE" \
+          MAMBA3_D_STATE="${MAMBA3_D_STATE:-128}" \
+          MAMBA3_EXPAND="${MAMBA3_EXPAND:-2}" \
+          MAMBA3_HEADDIM="${MAMBA3_HEADDIM:-64}" \
+          MAMBA3_CHUNK_SIZE="${MAMBA3_CHUNK_SIZE:-64}" \
+          MAMBA3_ROPE_FRACTION="${MAMBA3_ROPE_FRACTION:-0.5}" \
+          MAMBA3_USE_TRITON="${MAMBA3_USE_TRITON:-}" \
+          MAMBA3_USE_CUDA="${MAMBA3_USE_CUDA:-}" \
+          MAMBA3_SSD_IMPL="${MAMBA3_SSD_IMPL:-}" \
+          MAMBA3_PALLAS_DTYPE="${MAMBA3_PALLAS_DTYPE:-}" \
+          MAMBA3_CONTRACTION_PRECISION="${MAMBA3_CONTRACTION_PRECISION:-}" \
+          SINGLE_NODE_SHARD_MAP="${SINGLE_NODE_SHARD_MAP:-}" \
+          MAMBA3_STATE_PASSING="${MAMBA3_STATE_PASSING:-}" \
+          GRAD_ALLREDUCE_DTYPE="${GRAD_ALLREDUCE_DTYPE:-}" \
+          N_HEADS="${N_HEADS:-}" D_FF="${D_FF:-}" DTYPE="${DTYPE:-}" \
+          USE_FLASH="${USE_FLASH:-}" ATTENTION_MAX_CACHE_LEN="${ATTENTION_MAX_CACHE_LEN:-}" \
+          BLOCK_SIZE="${BLOCK_SIZE:-}" BLOCK_COUNTS="${BLOCK_COUNTS:-}" \
+          WINDOW_SIZE="${WINDOW_SIZE:-}" PE_TYPE="${PE_TYPE:-}" ROPE_BASE="${ROPE_BASE:-}" \
+          LOCAL_STEPS_K="${LOCAL_STEPS_K:-}" \
+          JAX_SEED="${JAX_SEED:-}" \
+          TICKERS="${TICKERS:-}" DATA_ROOT="${DATA_ROOT:-}" TEST_DIR="${TEST_DIR:-}" \
+          TRAIN_DATE_RANGE="${TRAIN_DATE_RANGE:-}" TEST_DATE_RANGE="${TEST_DATE_RANGE:-}" \
+          SQUASHFS_MULTI_MODE="${SQUASHFS_MULTI_MODE:-}" \
+          SQUASHFS_MONTHS="${SQUASHFS_MONTHS:-}" \
+          SQUASHFS_DIR="${SQUASHFS_DIR:-}" FORBID_RAW_NPYZST="${FORBID_RAW_NPYZST:-}" \
+          WANDB_PROJECT="${WANDB_PROJECT:-}" \
+          SBATCH_TIMELIMIT="${SBATCH_TIMELIMIT:-${SLURM_TIMELIMIT:-23:59:00}}" \
+          DILOCO_OUTER="${DILOCO_OUTER:-none}" \
+          DILOCO_OUTER_LR="${DILOCO_OUTER_LR:-0.7}" \
+          DILOCO_OUTER_MOMENTUM="${DILOCO_OUTER_MOMENTUM:-0.9}" \
+          sbatch --nodes=${SLURM_NNODES} --time=${SBATCH_TIMELIMIT:-${SLURM_TIMELIMIT:-23:59:00}} \
+                 --job-name="${_BASE_NAME}-resume${NEXT_DEPTH}" \
+                 --dependency=afterany:${SLURM_JOB_ID} \
+                 "$0"
+        echo "[Auto-Resume] Submitted with RESTORE_PATH=$RESUME_RESTORE_PATH RESTORE_STEP=${RESUME_RESTORE_STEP:-latest} (depth $NEXT_DEPTH/20)."
+      fi
+    else
+      echo "[Auto-Resume] No checkpoint available and no original RESTORE_PATH. Cannot resume."
+    fi
+  else
+    echo "[Auto-Resume] Checkpoint directory $CKPT_BASE not found."
+  fi
+else
+  if [ "$SRUN_EXIT" -eq 0 ]; then
+    echo "[*] Training completed successfully."
+  elif [ -n "${CURTAIL_EPOCHS:-}" ]; then
+    echo "[*] Test run (CURTAIL_EPOCHS=$CURTAIL_EPOCHS) finished with exit=$SRUN_EXIT"
+  fi
+fi
+
+exit ${SRUN_EXIT:-0}
+
+# The historical appendix (parameter tables, baseline provenance, node exclusion
+# lists) that used to sit below this line as a here-document is now
+# docs/training-launcher-appendix.md.

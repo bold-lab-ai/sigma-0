@@ -1,0 +1,5 @@
+include: model_zoo_smoke_base.yaml
+name: model_zoo_smoke_s5
+architecture: s5
+sbatch_job_name: sigma0-smoke-s5
+env_ARCHITECTURE: s5

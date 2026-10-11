@@ -1,0 +1,8 @@
+include: model_zoo_smoke_base.yaml
+name: model_zoo_smoke_kda
+architecture: kda
+sbatch_job_name: sigma0-smoke-kda
+env_ARCHITECTURE: kda
+env_GDN_NUM_HEADS: 4
+env_GDN_HEAD_DIM: 16
+env_GDN_CHUNK_SIZE: 16

@@ -1,0 +1,12 @@
+name: base_model_default
+package: base_model
+entrypoint: run/base_model/train_base_model.py
+model: default
+dataset: autoregressive_lob
+legacy_batch: run/base_model/train_full_autoreg.batch
+legacy_workdir: .
+sbatch_nodes: 8
+sbatch_time: 23:59:00
+sbatch_job_name: sigma0-base_model-default
+env_MODEL_PRESET: 75m
+env_EPOCHS: 40

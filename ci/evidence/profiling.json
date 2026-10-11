@@ -1,0 +1,93 @@
+{
+  "assertions": [
+    {
+      "metric": "profiling.ns_fields_heldout_share_pct",
+      "name": "the aggregate is field-concentrated",
+      "op": ">=",
+      "value": 60,
+      "why": "the PR's central claim: the flat 26-position mean is dominated by the nanosecond fields, so the aggregate must never be quoted without the decomposition"
+    },
+    {
+      "metric": "profiling.delta_t_ns_unigram_minus_ce",
+      "name": "delta_t_ns is near its unigram line",
+      "op": "<=",
+      "value": 0.6,
+      "why": "the model recovers under 0.6 nats of the 3.62-nat marginal there; if this ever grows a lot, the corpus or the encoding changed and the verdict must be re-derived"
+    }
+  ],
+  "kind": "profiling",
+  "metrics": {
+    "profiling": {
+      "checkpoint": {
+        "architecture": null,
+        "d_model": 1024,
+        "ignore_times": false,
+        "n_layers": 6,
+        "root": "/lus/lfs1aip2/projects/public/u6gb/sigma-0/checkpoints_selftrain/j5749206_9o8um51n_5749206",
+        "seed": 42,
+        "step": 62802
+      },
+      "delta_t_ns_unigram_minus_ce": 0.381,
+      "heldout": {
+        "acc": 0.8391935096153846,
+        "ce": 0.8017305731773376,
+        "slice": [
+          "2026-01-01",
+          "2026-01-31"
+        ]
+      },
+      "ns_fields_heldout_share_pct": 72.29,
+      "positions_below_002": 9,
+      "train_period": {
+        "acc": 0.8577247596153846,
+        "ce": 0.7149592041969299,
+        "slice": [
+          "2025-12-01",
+          "2025-12-31"
+        ]
+      }
+    }
+  },
+  "recorded": {
+    "branch": "feat/trainloss-profiling-20260826",
+    "commit": "7642d8e8d54c1a9ccb4760c0f51bd4752b874365",
+    "host": "login44",
+    "platform": "aarch64",
+    "python": "3.13.12",
+    "slurm_job": "6138079",
+    "utc": "2026-08-26T11:34:30Z"
+  },
+  "rerecorded": [
+    {
+      "file": "run/base_model/evaluate_ce_by_position.py",
+      "from": "2aebcdfdcbaf",
+      "to": "2242bbf46500",
+      "why": "the 26-token restriction was lifted so the evaluator honours a checkpoint's own token_mode; the CE computation is untouched, so the recorded metrics still describe what this file does for 26-token checkpoints, which is every checkpoint measured so far"
+    },
+    {
+      "file": "run/base_model/evaluate_ce_by_position.py",
+      "from": "2242bbf46500",
+      "to": "c321dde574ba",
+      "why": "each record now carries the token_mode and tokens-per-message it was scored under. A cross-tokenization table is only checkable if every row says which tokenizer produced it; without it the per-field widths were the only clue. Nothing in the CE computation changed, so the recorded metrics still describe what this file does."
+    },
+    {
+      "file": "run/base_model/evaluate_ce_by_position.py",
+      "from": "c321dde574ba",
+      "to": "9b8797a174c0",
+      "why": "the seven `from lob.*` imports became `from base_model.*` when the s5/lob packages were retired (PR #79 moved the modules byte-identically, PR 4 removed the aliases); one comment changed with them. No statement of the CE computation changed, so the recorded metrics still describe what this file does."
+    },
+    {
+      "file": "run/base_model/ce_by_position.sbatch",
+      "from": "fbee479b98be",
+      "to": "e2b8d1ada0f3",
+      "why": "the Slurm log directory is `logs/` instead of `logs_lobs5/`; the `#SBATCH --output` line is the only change. The job it launches is the same."
+    }
+  ],
+  "sources": {
+    "docs/experiments/trainloss_profiling_20260826/data/j5749206_9o8um51n_5749206_heldout.json": "979b3a59a2617b8d5b81bee97059faab36e9cd8bb435d66fa18242f48f4f2fee",
+    "docs/experiments/trainloss_profiling_20260826/data/j5749206_9o8um51n_5749206_train_period.json": "8a73553d6f54b67e8ed5ba3de6ec8d0b0a8288dfc55c0e72b3ca29c5a96ffadb",
+    "run/base_model/ce_by_position.sbatch": "e2b8d1ada0f3080184854bced232450383532f7d5660105342daa7af977cbaac",
+    "run/base_model/evaluate_ce_by_position.py": "9b8797a174c00be55fd13768c8d3b10465dda7568d9d20b742b4e1909a58a3d7",
+    "src/base_model/encoding/encoding_26tok.py": "745a599629bcd202779bdd7a8f857f25d5c8371c3038dce9af598f76011a3322"
+  }
+}

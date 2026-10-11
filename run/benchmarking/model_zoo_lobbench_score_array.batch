@@ -1,0 +1,105 @@
+#!/bin/bash
+# CPU-only authoritative WS-21 scoring for completed model-zoo generation.
+#SBATCH --job-name=sigma0-zoo-lobbench
+#SBATCH --array=0-14%5
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=72
+#SBATCH --mem=0
+#SBATCH --time=04:00:00
+#SBATCH --output=model_zoo_lobbench_%A_%a.out
+#SBATCH --error=model_zoo_lobbench_%A_%a.err
+
+set -euo pipefail
+
+ARCHITECTURES=(mamba3 s5 gdn kda transformer)
+TRAIN_SEEDS=(5 42 137)
+TASK_ID=${SLURM_ARRAY_TASK_ID:?SLURM_ARRAY_TASK_ID is required}
+ARCH_INDEX=$((TASK_ID / ${#TRAIN_SEEDS[@]}))
+SEED_INDEX=$((TASK_ID % ${#TRAIN_SEEDS[@]}))
+if [ "$ARCH_INDEX" -ge "${#ARCHITECTURES[@]}" ]; then
+    echo "Invalid paper-model LOBBench task: $TASK_ID" >&2
+    exit 2
+fi
+
+ARCHITECTURE=${ARCHITECTURES[$ARCH_INDEX]}
+TRAIN_SEED=${TRAIN_SEEDS[$SEED_INDEX]}
+WORKDIR="${WORKDIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
+MODEL_ZOO_ARTIFACT_ROOT="${MODEL_ZOO_ARTIFACT_ROOT:?MODEL_ZOO_ARTIFACT_ROOT is required}"
+QUANT_ROOT="${QUANT_ROOT:-/lus/lfs1aip2/projects/public/s5e/quant_team/quant}"
+PYTHON="${PYTHON:-$QUANT_ROOT/miniforge3/bin/python}"
+BENCHMARK_ROOT="${LOBBENCH_ROOT:-$QUANT_ROOT/AlphaTrade/lob_pipeline}"
+EVALUATION_OUTPUT_DIRNAME="${EVALUATION_OUTPUT_DIRNAME:-evaluation_30k}"
+OUTPUT_ROOT="$MODEL_ZOO_ARTIFACT_ROOT/$EVALUATION_OUTPUT_DIRNAME/$ARCHITECTURE/seed_$TRAIN_SEED"
+INFERENCE_DIR="$OUTPUT_ROOT/inference"
+GENERATION_MANIFEST="$OUTPUT_ROOT/generation_complete.json"
+LOBBENCH_OUTPUT="$OUTPUT_ROOT/lobbench"
+SUMMARY="$OUTPUT_ROOT/lobbench_summary.json"
+JOB_TMP="/tmp/${USER:-${LOGNAME:-unknown}}/sigma0/${SLURM_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
+N_SEQUENCES="${LOBBENCH_N_SEQUENCES:-3136}"
+
+CURRENT_COMMIT=$(git -C "$WORKDIR" rev-parse HEAD)
+if [ -n "${EXPECTED_COMMIT:-}" ] && [ "$CURRENT_COMMIT" != "$EXPECTED_COMMIT" ]; then
+    echo "Refusing code drift: expected $EXPECTED_COMMIT, found $CURRENT_COMMIT" >&2
+    exit 2
+fi
+CURRENT_LOBBENCH_REVISION=$(git -C "$BENCHMARK_ROOT" rev-parse HEAD)
+if [ -n "${EXPECTED_LOBBENCH_REVISION:-}" ] && \
+        [ "$CURRENT_LOBBENCH_REVISION" != "$EXPECTED_LOBBENCH_REVISION" ]; then
+    echo "Refusing LOBBench drift: expected $EXPECTED_LOBBENCH_REVISION, found $CURRENT_LOBBENCH_REVISION" >&2
+    exit 2
+fi
+[ -f "$GENERATION_MANIFEST" ] || {
+    echo "Missing successful generation manifest: $GENERATION_MANIFEST" >&2
+    exit 2
+}
+
+if [ -f "$SUMMARY" ]; then
+    "$PYTHON" - "$SUMMARY" <<'PY'
+import json, sys
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+if payload.get("feature_count") != 21 or payload.get("ws21") is None:
+    raise SystemExit(f"existing summary is not a complete WS-21 result: {sys.argv[1]}")
+PY
+    echo "[lobbench] already complete: $SUMMARY"
+    exit 0
+fi
+if [ -d "$LOBBENCH_OUTPUT" ] && [ -n "$(find "$LOBBENCH_OUTPUT" -mindepth 1 -print -quit)" ]; then
+    echo "Refusing to mix with incomplete LOBBench output: $LOBBENCH_OUTPUT" >&2
+    exit 2
+fi
+
+mkdir -p "$LOBBENCH_OUTPUT" "$JOB_TMP"
+export TMPDIR="$JOB_TMP"
+export MPLCONFIGDIR="$JOB_TMP/matplotlib"
+mkdir -p "$MPLCONFIGDIR"
+export PYTHONPATH="$WORKDIR/src:$WORKDIR:${PYTHONPATH:-}"
+export PYTHONNOUSERSITE=1
+export JAX_PLATFORMS=cpu
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
+
+echo "[lobbench] task=$TASK_ID architecture=$ARCHITECTURE seed=$TRAIN_SEED revision=$CURRENT_LOBBENCH_REVISION"
+"$PYTHON" -u -B "$WORKDIR/run/benchmarking/run_lobbench.py" \
+    --run-name="sigma0-${ARCHITECTURE}-s${TRAIN_SEED}-30k" \
+    --inference-dir="$INFERENCE_DIR" \
+    --output-dir="$LOBBENCH_OUTPUT" \
+    --stock=GOOG --period=2026-01 \
+    --benchmark-root="$BENCHMARK_ROOT" \
+    --python="$PYTHON" --n-workers="${LOBBENCH_WORKERS:-48}" \
+    --run-id=production30k \
+    --summary="$SUMMARY"
+
+"$PYTHON" - "$SUMMARY" "$GENERATION_MANIFEST" <<'PY'
+import json
+import sys
+summary = json.load(open(sys.argv[1], encoding="utf-8"))
+generation = json.load(open(sys.argv[2], encoding="utf-8"))
+if summary.get("feature_count") != 21 or summary.get("expected_feature_count") != 21:
+    raise SystemExit("LOBBench did not produce all 21 frozen features")
+if summary.get("benchmark_revision") != generation.get("lobbench_revision"):
+    raise SystemExit("LOBBench revision does not match the generation manifest")
+if summary.get("ws21") is None or summary.get("ks21") is None or summary.get("l1_21") is None:
+    raise SystemExit("LOBBench summary is missing a frozen aggregate")
+PY
+
+echo "[lobbench] complete summary=$SUMMARY"

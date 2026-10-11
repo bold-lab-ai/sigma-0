@@ -1,0 +1,34 @@
+# Experiments
+
+Every experiment this code has run, with the code that runs it and where its
+numbers are. Write-ups live in the subdirectories here; figures and result
+files live in the results database at
+`/lus/lfs1aip2/projects/public/u6gb/results` (RESULTS below), never in git.
+Add a row when you open the PR, not after.
+
+| experiment | when | PR | code | configs and inputs | evidence and outputs | write-up |
+|---|---|---|---|---|---|---|
+| Full-autoreg launcher restoration and smoke | Jun 2026 | pre-PR (commits to `main`) | `run/base_model/train_full_autoreg.batch`, `node_wrapper.sh`, `runtime/train.py` | `configs/train/mamba3_smoke.yaml`, `goog_2022_smoke_index.json` | jobs 5182034, 5183697, 5299797, 5332534 (all failed before one step; the config is too large for one node at 10 per GPU), 6347641 (passes at `PER_GPU_BSZ=1`) | `docs/training.md` |
+| Model zoo: six backbones at 8.1M parameters | Jul 2026 | #1, #3 and the model-zoo launchers | `run/base_model/model_zoo_*.batch`, `run/benchmarking/model_zoo_*`, `run/benchmarking/submit_model_zoo_evaluation.sh` | `configs/train/model_zoo_smoke_*.yaml`, `run/benchmarking/model_zoo_GOOG_jan2026_3136_seq500_seed42.txt` | `docs/evidence/zoo_benchmark.json`, `docs/evidence/lobbench_divergence_mamba3_seed42.json`; notebooks `model_zoo/zoo_benchmark.ipynb`, `model_zoo/lobbench_divergence.ipynb` | `model_zoo/protocol.md`, `model_zoo/january_evaluation_summary.md` |
+| RMSNorm epsilon A/B at 78M | Jul to Aug 2026 | branch `rmsnorm-train-ab-final-20260731` (#11 era) | `run/base_model/model_zoo_production_array.batch` | `configs/train/selftrain12h_*.yaml` (these run the trainer from the `openreview-v2` checkout, not from here) | notebook `model_zoo/rmsnorm_epsilon.ipynb` | in the notebook |
+| Self-training checkpoints and their LOB-Bench chain | Jul 2026 | pre-#1 | `run/benchmarking/selftrain_checkpoint_{generation,finalize,inference_smoke,lobbench_score}.batch`, `update_selftrain_lobbench_state.py`, `validate_selftrain_inference.py` | `configs/train/selftrain*.yaml`; checkpoints `j5705912_b30675li_5705912` step 69378 and siblings under `.../u6gb/sigma-0/checkpoints_selftrain` | W&B project `oxford-lob/sigma0-selftrain`; the strict summary gate failed on three `-9999 ns` inter-arrivals (the START-token validity bug, fixed in #1) | `lobbench_negative_time/root_cause.zh.md` |
+| Faithful simulator and agentic market making | Jul to Aug 2026 | #2, #4, #7 to #12 | `src/post_training/heuristic_learning/`, `run/environment/build_episodes.sbatch`, `run_episodes_multinode.sh` | episodes under `.../u6gb/tasks/agentic_mm_<UTC>/`; pinned world models in `heuristic_learning/checkpoints.py` | `ci/evidence/simulator.json`; `docs/defect_register.json` (31 defects, 25 fixed) | `agentic_mm/handoff.md`, `agentic_mm/progress_20260731.md`, `../fidelity_defect_taxonomy.md` |
+| do(Q) injection into a generated rollout | Aug to Sep 2026 | #16, #21, #68 | `base_model/inference/generate.py` (`sample_new` injection kwargs), `tools/diagnostics/verify_injection.py`, `lobpipeline/injection_verification.py` | `m3-goog-78m-u6gb` step 28730, GOOG 2026-02-27 | `ci/evidence/injection.json`, `docs/evidence/injection_report_*.json` | `docs/inference.md` (do(Q) section) |
+| Event-anchored return bench | Aug 2026 | #19 | `src/lobpipeline/return_bench/`, `run/base_model/eval/pick_trade_anchors.py`, `ci/mutation_check.py` | anchors and inference under `.../u6gb/tasks/return_bench_scaling_20260817/` | `ci/evidence/return_bench.json`; figures in RESULTS `sigma0-relocated-figures-20260905` | `return_bench_event_anchored/README.md` |
+| Hybrid Mamba3 with Nemotron-H attention positions | Aug 2026 | #21 | `base_model/models/registry.py` (`hybrid_mamba3`), `layers.py` | `hybrid_attn_*` config args (`docs/training.md`) | tests `test_hybrid_construction.py`, `test_transformer_*` | PR #21 body |
+| LOB-Bench scoring modes and the divergence curve | Aug to Sep 2026 | #28 | `src/lobpipeline/lob_bench/scoring.py`, `run/benchmarking/run_lobbench.py`, `lobbench_shard_array.batch` | `configs/bench/*.yaml` | `src/lobpipeline/scorer/merge.json`; figures in RESULTS `sigma0-relocated-figures-20260905` | `docs/benchmarking.md` |
+| State model on a 1 ms frame clock, four post-training methods | Aug 2026 | #38 | `src/state/` | | `ci/check_state_posttraining.py`, tests `test_state_*` | `src/state/README.md`, `src/state/posttraining/README.md` |
+| Training-loss profiling: per-position CE decomposition | Aug to Sep 2026 | #33 | `run/base_model/evaluate_ce_by_position.py`, `run/base_model/ce_by_position*.sbatch`, `ce_capacity_probe.sbatch`, `LOG_CE_BY_POSITION` in the train step | pinned zoo checkpoints (`src/lobpipeline/model_store_pins.json`) | `ci/evidence/profiling.json`, `trainloss_profiling_20260826/data/*.json` (11 records), notebook `trainloss_profiling_20260826/entropy_floor_analysis.ipynb` | `trainloss_profiling_20260826/plan.md`, `trainloss_profiling_20260826/README.md` |
+| Message-level perplexity across tokenizations | Sep 2026 | #58 | `base_model/evaluation/message_perplexity.py`, `run/base_model/message_perplexity_report.py` | the 24- and 26-token encodings | `ci/check_message_perplexity.py`; notebook `message_perplexity/message_perplexity.ipynb`; HTML export in RESULTS `sigma0-relocated-figures-20260905` | in the notebook |
+| Repository cleanup: conduct rules, `base_model` reorganisation, this wiki | Sep 2026 | #78, #79, this PR | `base_model/_compat.py`, `ci/check_legacy_imports.py` | | gate jobs 6347532, 6347661 (suite record), 6347641 (training smoke) | `docs/architecture.md` |
+
+| Validation-set selection and leakage audit | Jul to Sep 2026 | #51 | Historical scripts at [f1f356bbf6b4](https://github.com/KangOxford/sigma-0/tree/f1f356bbf6b48ac2f48f7610bb55b9c9a72716d8/s5e_scalinglaw/validation) | Frozen valset and uniform Jan-2026 draw | Tables and figures pinned to the same source commit in the write-ups | [Selection rule](validation_sets/README.md), [leakage audit](validation_sets/leakage_audit.md) |
+| LOB-Bench inference trees stored as one SquashFS image | Sep 2026 | #TBD | `src/lobpipeline/storage/sqfs.py`, `run/benchmarking/pack_inference.py`, `pack_gen_wrapper.sh`, `selftrain_checkpoint_generation.batch` | `LOBBENCH_PACK` (default 1), `SIGMA0_SQUASHFS_BIN` | job 6423589 packed and verified 16 trees, 400,872 files to 16 images, 9.8x, all per-file sha256 equal; `lobbench_squashfs/measurements.json` | `lobbench_squashfs/lobbench_file_count.ipynb` |
+
+## Adding an experiment
+
+1. One row above, when the PR opens.
+2. Launchers in `run/<subsystem>/`, configs in `configs/`, code in `src/`.
+3. Numbers into an evidence record if CI should guard them, otherwise into the
+   results database. Figures and exports always into the results database.
+4. A write-up, if there is one, under `docs/experiments/<slug>/`.

@@ -1,0 +1,149 @@
+#!/bin/bash
+# CPU-only authoritative WS-21 scoring for one completed self-train generation.
+#SBATCH --job-name=sigma0-st-ws21
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=72
+#SBATCH --mem=0
+#SBATCH --time=04:00:00
+
+set -euo pipefail
+
+: "${LAUNCHER_WORKDIR:?LAUNCHER_WORKDIR is required}"
+: "${RUNTIME_WORKDIR:?RUNTIME_WORKDIR is required}"
+: "${EXPECTED_RUNTIME_COMMIT:?EXPECTED_RUNTIME_COMMIT is required}"
+: "${EXPECTED_LOBBENCH_REVISION:?EXPECTED_LOBBENCH_REVISION is required}"
+: "${TASK_ROOT:?TASK_ROOT is required}"
+
+QUANT_ROOT="${QUANT_ROOT:-/lus/lfs1aip2/projects/public/s5e/quant_team/quant}"
+BENCHMARK_ROOT="${LOBBENCH_ROOT:-$QUANT_ROOT/AlphaTrade/lob_pipeline}"
+PYTHON="${PYTHON:-$QUANT_ROOT/miniforge3/bin/python}"
+STATE_HELPER="$LAUNCHER_WORKDIR/run/benchmarking/update_selftrain_lobbench_state.py"
+OUTPUT_ROOT="$TASK_ROOT/evaluation"
+INFERENCE_DIR="$OUTPUT_ROOT/inference"
+GENERATION_MANIFEST="$OUTPUT_ROOT/generation_complete.json"
+LOBBENCH_OUTPUT="$OUTPUT_ROOT/lobbench"
+SUMMARY="$OUTPUT_ROOT/lobbench_summary.json"
+COMPLETE_MANIFEST="$OUTPUT_ROOT/evaluation_complete.json"
+STEP_REF="${SLURM_JOB_ID}${SLURM_STEP_ID:+.${SLURM_STEP_ID}}"
+JOB_TMP="/tmp/${USER:-${LOGNAME:-unknown}}/sigma0/${SLURM_JOB_ID}_${SLURM_STEP_ID:-batch}"
+
+record_state() {
+    "$PYTHON" "$STATE_HELPER" \
+        --task-root "$TASK_ROOT" \
+        --state "$1" \
+        --job-id "$STEP_REF" \
+        --action "$2" \
+        ${3:+--metric "$3"} \
+        ${4:+--alert "$4"}
+}
+
+on_error() {
+    local exit_code=$?
+    trap - ERR
+    record_state failed lobbench_failed "exit_code=$exit_code" \
+        "See $TASK_ROOT/slurm/lobbench_${SLURM_JOB_ID}.err"
+    exit "$exit_code"
+}
+trap on_error ERR
+
+record_state running lobbench_started
+
+CURRENT_COMMIT=$(git -c safe.directory="$RUNTIME_WORKDIR" \
+    -C "$RUNTIME_WORKDIR" rev-parse HEAD)
+if [ "$CURRENT_COMMIT" != "$EXPECTED_RUNTIME_COMMIT" ]; then
+    echo "Refusing runtime drift: expected $EXPECTED_RUNTIME_COMMIT, found $CURRENT_COMMIT" >&2
+    exit 2
+fi
+CURRENT_LOBBENCH_REVISION=$(git -C "$BENCHMARK_ROOT" rev-parse HEAD)
+if [ "$CURRENT_LOBBENCH_REVISION" != "$EXPECTED_LOBBENCH_REVISION" ]; then
+    echo "Refusing LOBBench drift: expected $EXPECTED_LOBBENCH_REVISION, found $CURRENT_LOBBENCH_REVISION" >&2
+    exit 2
+fi
+[ -f "$GENERATION_MANIFEST" ] || {
+    echo "Missing successful generation manifest: $GENERATION_MANIFEST" >&2
+    exit 2
+}
+
+if [ -f "$SUMMARY" ]; then
+    METRIC=$("$PYTHON" - "$SUMMARY" <<'PY'
+import json
+import sys
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+if payload.get("feature_count") != 21 or payload.get("ws21") is None:
+    raise SystemExit(f"existing summary is incomplete: {sys.argv[1]}")
+print(f"ws21={payload['ws21']:.10g}")
+PY
+)
+    record_state eval_done lobbench_already_complete "$METRIC"
+    exit 0
+fi
+if [ -d "$LOBBENCH_OUTPUT" ] && [ -n "$(find "$LOBBENCH_OUTPUT" -mindepth 1 -print -quit)" ]; then
+    echo "Refusing to mix with incomplete LOBBench output: $LOBBENCH_OUTPUT" >&2
+    exit 2
+fi
+
+mkdir -p "$LOBBENCH_OUTPUT" "$JOB_TMP"
+export TMPDIR="$JOB_TMP"
+export MPLCONFIGDIR="$JOB_TMP/matplotlib"
+mkdir -p "$MPLCONFIGDIR"
+export PYTHONPATH="$RUNTIME_WORKDIR/src:$RUNTIME_WORKDIR:${PYTHONPATH:-}"
+export PYTHONNOUSERSITE=1
+export JAX_PLATFORMS=cpu
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
+
+"$PYTHON" -u -B "$RUNTIME_WORKDIR/run/benchmarking/run_lobbench.py" \
+    --run-name="sigma0-selftrain-j${TRAIN_JOB_ID:-unknown}-step${CHECKPOINT_STEP:-unknown}" \
+    --inference-dir="$INFERENCE_DIR" \
+    --output-dir="$LOBBENCH_OUTPUT" \
+    --stock=GOOG --period=2026-01 \
+    --benchmark-root="$BENCHMARK_ROOT" \
+    --python="$PYTHON" --n-workers="${LOBBENCH_WORKERS:-48}" \
+    --run-id="selftrain-${TRAIN_JOB_ID:-unknown}" \
+    --summary="$SUMMARY"
+
+METRIC=$("$PYTHON" - "$SUMMARY" "$GENERATION_MANIFEST" "$COMPLETE_MANIFEST" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+summary = json.load(open(sys.argv[1], encoding="utf-8"))
+generation = json.load(open(sys.argv[2], encoding="utf-8"))
+if summary.get("feature_count") != 21 or summary.get("expected_feature_count") != 21:
+    raise SystemExit("LOBBench did not produce all 21 frozen features")
+if summary.get("benchmark_revision") != generation.get("lobbench_revision"):
+    raise SystemExit("LOBBench revision does not match the generation manifest")
+for key in ("ws21", "ks21", "l1_21"):
+    if summary.get(key) is None:
+        raise SystemExit(f"LOBBench summary is missing {key}")
+complete = {
+    "score_job_id": os.environ["SLURM_JOB_ID"],
+    "score_step_id": os.environ.get("SLURM_STEP_ID"),
+    "generation_job_id": generation["generation_job_id"],
+    "generation_step_id": generation.get("generation_step_id"),
+    "training_job_id": generation["training_job_id"],
+    "checkpoint_path": generation["checkpoint_path"],
+    "checkpoint_step": generation["checkpoint_step"],
+    "sigma0_runtime_commit": generation["sigma0_runtime_commit"],
+    "lobbench_revision": generation["lobbench_revision"],
+    "feature_count": summary["feature_count"],
+    "ws21": summary["ws21"],
+    "ks21": summary["ks21"],
+    "l1_21": summary["l1_21"],
+    "summary_path": str(Path(sys.argv[1]).resolve()),
+}
+Path(sys.argv[3]).write_text(
+    json.dumps(complete, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+print(
+    f"ws21={summary['ws21']:.10g},"
+    f"ks21={summary['ks21']:.10g},"
+    f"l1_21={summary['l1_21']:.10g}"
+)
+PY
+)
+
+record_state eval_done lobbench_complete "$METRIC"
+echo "[lobbench] complete summary=$SUMMARY"

@@ -1,0 +1,157 @@
+{
+  "assertions": [
+    {
+      "metric": "return_bench.identity_max_abs_dev_ic",
+      "name": "identity check is exact for IC",
+      "op": "<=",
+      "value": 1e-12,
+      "why": "feeding real in as generated must score 1.0; anything less means the pairing, the timestamps or the book row are off, and every other number in this file was produced by the same code path"
+    },
+    {
+      "metric": "return_bench.identity_max_abs_dev_ranked_ic",
+      "name": "identity check is exact for Ranked IC",
+      "op": "<=",
+      "value": 1e-12
+    },
+    {
+      "metric": "return_bench.identity_max_abs_dev_dir_acc",
+      "name": "identity check is exact for Direction Accuracy",
+      "op": "<=",
+      "value": 1e-12
+    },
+    {
+      "metric": "return_bench.identity_max_ks",
+      "name": "identity distributions coincide",
+      "op": "==",
+      "value": 0.0,
+      "why": "a non-zero KS between a series and itself would mean the two sides are not reading the same rows"
+    },
+    {
+      "metric": "return_bench.anchor_purity_pct",
+      "name": "every scored window ends on a trade",
+      "op": "==",
+      "value": 100.0,
+      "why": "the anchor is the whole claim; ~2% of grid windows end on a trade, so a broken bypass would still produce plausible-looking returns"
+    },
+    {
+      "metric": "return_bench.null_ic_sd_max",
+      "name": "the null is a null",
+      "op": "<=",
+      "value": 0.3,
+      "why": "if re-pairing at random leaves an IC spread this wide, the sample is too small for the reported IC to mean anything"
+    },
+    {
+      "metric": "return_bench.n_anchored",
+      "name": "sample count does not shrink silently",
+      "op": ">=",
+      "value": 38,
+      "why": "fewer anchors is a different experiment; lowering this needs a reason in the PR"
+    }
+  ],
+  "inputs": {
+    "horizons_ms": "1,5,10,25,50,100",
+    "infer_dir": "/lus/lfs1aip2/projects/public/u6gb/ci_evidence_inputs/return_bench_hp_base_member0",
+    "n_pairs": 2000
+  },
+  "kind": "return_bench",
+  "metrics": {
+    "return_bench": {
+      "anchor_purity_pct": 100.0,
+      "by_horizon": {
+        "1": {
+          "IC": 0.7758085354045847,
+          "N_cov": 38,
+          "N_eff": 32,
+          "clock_msg_ratio": 0.9125117591721543,
+          "coverage_pct": 100.0,
+          "direction_acc": 0.8125,
+          "ranked_IC": 0.8268548977197471,
+          "std_ratio": 0.8544333342671934
+        },
+        "5": {
+          "IC": 0.8077896301080264,
+          "N_cov": 32,
+          "N_eff": 29,
+          "clock_msg_ratio": 0.9391691394658753,
+          "coverage_pct": 84.21052631578948,
+          "direction_acc": 0.8275862068965517,
+          "ranked_IC": 0.8146450124364405,
+          "std_ratio": 0.9246846476976446
+        },
+        "10": {
+          "IC": 0.8065895984741029,
+          "N_cov": 29,
+          "N_eff": 28,
+          "clock_msg_ratio": 0.9195998517969619,
+          "coverage_pct": 76.3157894736842,
+          "direction_acc": 0.8571428571428571,
+          "ranked_IC": 0.8754630576364372,
+          "std_ratio": 0.9537890049879812
+        },
+        "25": {
+          "IC": 0.7941320196902817,
+          "N_cov": 27,
+          "N_eff": 26,
+          "clock_msg_ratio": 1.001660026560425,
+          "coverage_pct": 71.05263157894737,
+          "direction_acc": 0.8461538461538461,
+          "ranked_IC": 0.8346081288366097,
+          "std_ratio": 0.781040793579934
+        },
+        "50": {
+          "IC": 0.5757587913049975,
+          "N_cov": 22,
+          "N_eff": 21,
+          "clock_msg_ratio": 1.1471189211279116,
+          "coverage_pct": 57.89473684210526,
+          "direction_acc": 0.8095238095238095,
+          "ranked_IC": 0.7241383938373523,
+          "std_ratio": 0.8036563766901343
+        },
+        "100": {
+          "IC": 0.6004340813353988,
+          "N_cov": 13,
+          "N_eff": 13,
+          "clock_msg_ratio": 0.9814814814814815,
+          "coverage_pct": 34.21052631578947,
+          "direction_acc": 0.8461538461538461,
+          "ranked_IC": 0.6107296011476098,
+          "std_ratio": 0.8396751870381459
+        }
+      },
+      "horizons_ms": [
+        1,
+        5,
+        10,
+        25,
+        50,
+        100
+      ],
+      "identity_max_abs_dev_dir_acc": 0.0,
+      "identity_max_abs_dev_ic": 0.0,
+      "identity_max_abs_dev_ranked_ic": 1.1102230246251565e-16,
+      "identity_max_ks": 0.0,
+      "n_anchored": 38,
+      "n_pairs": 2000,
+      "n_rejected_not_trade": 1961,
+      "null_dir_acc_max": 0.4846551724137931,
+      "null_dir_acc_min": 0.43096153846153845,
+      "null_ic_sd_max": 0.2891756135935212
+    }
+  },
+  "recorded": {
+    "branch": "feat/cleanup-4-finish-rename",
+    "commit": "89ed62ca4e4bb227155035228d0567c35c7a8ca6",
+    "host": "nid010412",
+    "platform": "aarch64",
+    "python": "3.12.11",
+    "utc": "2026-09-06T02:11:25Z"
+  },
+  "sources": {
+    "run/base_model/eval/pick_trade_anchors.py": "cfe8cba3b4fb00de772b56e927eaacda800f1ee010f319220bfc8923c346b468",
+    "src/base_model/data/data_files.py": "c26cea2e1f1f42d2fbfdf51472bfa0565f365ce407a703e98069c5a5c06d13fc",
+    "src/lobpipeline/return_bench/event_anchored.py": "1c6d4f53bf2f94f6578bd03d5085f12cd0f47b7fc3ce02dda8168ce2e2b310f8",
+    "src/lobpipeline/return_bench/run_event_bench.py": "60846d3a81258f26272c3e7faf41b125b3e7418999361e10072103010d83c609"
+  },
+  "what": "event-anchored return bench: identity check, shuffle null, and the per-horizon numbers the metric produced on a fixed inference directory"
+}

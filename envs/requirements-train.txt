@@ -1,0 +1,86 @@
+# ---------------------------------------------------------------------------
+# sigma-0 training requirements (conda Family 1: quant miniforge3 base).
+# Verbatim copy (2026-07-15) of:
+#   /home/u6gb/alexbismuth.u6gb/AlphaTrade/experiments/Mamba3_GOOG_pretraining/requirements.txt
+# NOTE: mostly unpinned by design — the live shared env is the ground truth;
+# probed live versions as of 2026-07-15 are recorded in docs/environments.md
+# (jax 0.9.0.1, flax 0.12.2, optax 0.2.6, orbax-checkpoint 0.11.32,
+#  torch 2.8.0+cu129, zstandard 0.23.0, wandb 0.21.3).
+# ---------------------------------------------------------------------------
+
+# Core ML and Scientific Computing
+numpy
+pandas
+matplotlib
+scipy
+scikit-learn
+statsmodels
+
+# JAX (Updated versions that are compatible)
+optax
+flax
+chex
+dm-tree
+ml-dtypes
+
+# Deep Learning
+tfp-nightly
+
+
+# RL and Environment Libraries
+gym
+dm-env
+brax==0.12.*
+gymnax
+mujoco
+
+# Jupyter and Development
+jupyter
+# jupyterlab
+ipython
+ipykernel
+notebook
+# ipywidgets
+
+# Web and API
+Flask
+Flask-Cors
+requests
+
+# Visualization and Plotting
+tensorboard
+tensorboardX
+wandb
+plotly==5.22.0
+kaleido==0.1.*
+
+# Utility Libraries
+tqdm
+click
+PyYAML
+pillow
+joblib
+cloudpickle
+
+# Development and Testing
+pytest
+pytest-cov
+
+
+# Specialized Libraries
+einops
+trimesh
+PyOpenGL
+distrax
+evosax
+ml-collections
+orbax-checkpoint==0.11.18
+ray
+xgboost
+
+# Core Dependencies
+absl-py
+packaging
+typing-extensions
+setuptools
+wheel

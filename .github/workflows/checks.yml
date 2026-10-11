@@ -1,0 +1,341 @@
+name: checks
+
+# One workflow, one job. Every guard in ci/ is standard library and finishes in
+# seconds; GitHub bills each job in whole minutes, so nine workflows with ten
+# jobs cost about ten billed minutes per push for about thirty seconds of work.
+# Here they run as steps of one job, each with continue-on-error so a red guard
+# does not hide the others, and a final verdict step fails the job if any of
+# them failed. The steps are the former workflows' steps, unchanged in what
+# they run; their names say which guard they belong to.
+#
+# The cluster measures, CI audits: nothing here re-runs an experiment. Records
+# under ci/evidence/ carry SHA-256s of the sources they describe and are
+# re-recorded on the cluster (docs/ci-and-evidence.md).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  guards:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the return-bench provenance step walks history
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Dependencies for the unit steps (the guards themselves need none)
+        run: python -m pip install --quiet pytest numpy scipy pandas
+
+      # ---- evidence -------------------------------------------------------
+      - name: "evidence: the audit can fail"
+        id: evidence_selftest
+        continue-on-error: true
+        run: python ci/check_evidence.py --self-test | tee /tmp/evidence.txt
+      - name: "evidence: audit recorded evidence"
+        id: evidence_audit
+        continue-on-error: true
+        run: python ci/check_evidence.py | tee -a /tmp/evidence.txt
+
+      # ---- english-only ---------------------------------------------------
+      - name: "english-only: the scan can fail and its own machinery is clean"
+        id: english_selftest
+        continue-on-error: true
+        run: python3 ci/check_english_only.py --self-test | tee /tmp/english.txt
+      - name: "english-only: no Chinese outside the known list"
+        id: english
+        continue-on-error: true
+        run: python3 ci/check_english_only.py --list | tee -a /tmp/english.txt
+
+      # ---- legacy imports -------------------------------------------------
+      - name: "legacy-imports: the guard can fail"
+        id: legacy_selftest
+        continue-on-error: true
+        run: python3 ci/check_legacy_imports.py --self-test | tee /tmp/legacy.txt
+      - name: "legacy-imports: no s5 / lob / root-module imports"
+        id: legacy
+        continue-on-error: true
+        run: python3 ci/check_legacy_imports.py | tee -a /tmp/legacy.txt
+
+      # ---- lobbench merge -------------------------------------------------
+      - name: "lobbench-merge: the merge record and the modes hold"
+        id: lobbench_merge
+        continue-on-error: true
+        run: python3 ci/check_lobbench_merge.py 2>&1 | tee /tmp/lobbench.txt
+      - name: "lobbench-merge: each guard still catches what it is for"
+        id: lobbench_merge_selftest
+        continue-on-error: true
+        run: python3 ci/check_lobbench_merge.py --self-test 2>&1 | tee -a /tmp/lobbench.txt
+      - name: "lobbench-merge: the adapter's own tests pass without the scoring dependencies"
+        id: lobbench_tests
+        continue-on-error: true
+        run: |
+          python -m pytest tests/unit/test_merged_scorer.py \
+                           tests/unit/test_lobbench_scoring.py \
+                           tests/unit/test_lobbench_metrics.py -q 2>&1 | tee -a /tmp/lobbench.txt
+
+      # ---- ce decomposition -----------------------------------------------
+      - name: "ce-decomposition: the labelling contracts hold"
+        id: ce_decomp
+        continue-on-error: true
+        run: python3 ci/check_ce_decomposition.py 2>&1 | tee /tmp/ce.txt
+      - name: "ce-decomposition: each guard still catches what it is for"
+        id: ce_decomp_selftest
+        continue-on-error: true
+        run: python3 ci/check_ce_decomposition.py --self-test 2>&1 | tee -a /tmp/ce.txt
+      - name: "ce-decomposition: the decomposition test passes without jax"
+        id: ce_decomp_tests
+        continue-on-error: true
+        run: python -m pytest tests/unit/test_ce_decomposition.py -q 2>&1 | tee -a /tmp/ce.txt
+
+      # ---- message perplexity ---------------------------------------------
+      - name: "message-perplexity: self-test (prove the guard can fail)"
+        id: mp_selftest
+        continue-on-error: true
+        run: python ci/check_message_perplexity.py --self-test | tee /tmp/mp.txt
+      - name: "message-perplexity: audit the repo"
+        id: mp_audit
+        continue-on-error: true
+        run: python ci/check_message_perplexity.py | tee -a /tmp/mp.txt
+      - name: "message-perplexity: the metric and its invariance across tokenizations (no jax)"
+        id: mp_tests
+        continue-on-error: true
+        run: python -m pytest tests/unit/test_message_perplexity.py -q | tee -a /tmp/mp.txt
+      - name: "message-perplexity: the committed report is what the reporter produces today"
+        id: mp_report
+        continue-on-error: true
+        run: |
+          if [ ! -d docs/experiments/trainloss_profiling_20260826/data ] || [ ! -f artifacts/message_perplexity/report.json ]; then
+            echo "no committed report to re-derive" | tee -a /tmp/mp.txt
+            exit 0
+          fi
+          python run/base_model/message_perplexity_report.py \
+            --records docs/experiments/trainloss_profiling_20260826/data \
+            --output /tmp/rederived.json | tee -a /tmp/mp.txt
+          python - <<'PY' | tee -a /tmp/mp.txt
+          import json
+          a = json.load(open("artifacts/message_perplexity/report.json"))
+          b = json.load(open("/tmp/rederived.json"))
+          assert a == b, "the committed report is not what the reporter produces today"
+          print("committed report matches a fresh derivation exactly")
+          PY
+
+      # ---- injection ------------------------------------------------------
+      - name: "injection: the evidence exists"
+        id: injection_exists
+        continue-on-error: true
+        run: test -f ci/evidence/injection.json && echo "ci/evidence/injection.json present" | tee /tmp/injection.txt
+      - name: "injection: re-audit the fixed-template report"
+        id: injection_check
+        continue-on-error: true
+        run: |
+          REPORT=$(ls docs/evidence/injection_report_*.json | sort | tail -1)
+          echo "report: $REPORT" | tee -a /tmp/injection.txt
+          python3 tools/diagnostics/verify_injection.py --check "$REPORT" | tee -a /tmp/injection.txt
+      - name: "injection: evidence and report tell the same story"
+        id: injection_agree
+        continue-on-error: true
+        run: |
+          REPORT=$(ls docs/evidence/injection_report_*.json | sort | tail -1)
+          python3 - "$REPORT" <<'PY' | tee -a /tmp/injection.txt
+          import json, sys
+          report = json.load(open(sys.argv[1]))
+          evidence = json.load(open("ci/evidence/injection.json"))
+          ev_in, ev_m = evidence["inputs"], evidence["metrics"]["injection"]
+          rp_in, rp_p = report["inputs"], report["params"]
+          checks = {
+              "arm digest": (ev_in["digest"], rp_in["arm_digest_i"]),
+              "node": (ev_in["node"], rp_in["node"]),
+              "overall_pass": (ev_m["overall_pass"], report["overall_pass"]),
+              **{k: (ev_in[k], rp_p[k]) for k in (
+                  "inject_step", "inject_event_type", "inject_side",
+                  "inject_qty", "inject_price_offset_ticks", "seed")},
+          }
+          drift = {k: v for k, v in checks.items() if v[0] != v[1]}
+          for k, (a, b) in checks.items():
+              print(f"  {'DRIFT' if k in drift else 'ok':5s} {k}: evidence={a} report={b}")
+          if drift:
+              raise SystemExit(f"evidence and report disagree on: {sorted(drift)}")
+          print("evidence and report agree")
+          PY
+      - name: "injection: the checker's own tests pass without jax"
+        id: injection_tests
+        continue-on-error: true
+        run: |
+          python -m pytest tests/unit/test_verify_injection.py \
+                           tests/unit/test_injection_wiring.py -q | tee -a /tmp/injection.txt
+
+      # ---- return bench ---------------------------------------------------
+      - name: "return-bench: the evidence exists"
+        id: rb_exists
+        continue-on-error: true
+        run: test -f ci/evidence/return_bench.json && echo "ci/evidence/return_bench.json present" | tee /tmp/rb.txt
+      - name: "return-bench: the identity gate has not been loosened"
+        id: rb_identity
+        continue-on-error: true
+        run: |
+          python3 - <<'PY' | tee -a /tmp/rb.txt
+          import ast, pathlib, sys
+          src = pathlib.Path("src/lobpipeline/return_bench/run_event_bench.py").read_text()
+          tol = None
+          for node in ast.walk(ast.parse(src)):
+              if isinstance(node, ast.Assign) and any(
+                      isinstance(t, ast.Name) and t.id == "IDENTITY_TOL" for t in node.targets):
+                  tol = ast.literal_eval(node.value)
+          if tol is None:
+              raise SystemExit("IDENTITY_TOL is gone from run_event_bench.py; the identity "
+                               "check no longer has a stated tolerance")
+          print(f"  IDENTITY_TOL = {tol:g}")
+          if tol > 1e-9:
+              raise SystemExit(f"IDENTITY_TOL loosened to {tol:g}. Feeding the real stream in "
+                               "as generated must score 1.0 to within 1e-9; a looser bound "
+                               "keeps the check printing PASSED while it stops meaning "
+                               "anything.")
+          if "IDENTITY_TOL" not in src.split("def main")[-1]:
+              raise SystemExit("IDENTITY_TOL is defined but main() no longer compares against "
+                               "it; the asserted constant and the enforced one have parted ways")
+          print("  identity gate intact")
+          PY
+      - name: "return-bench: the evidence still hashes the metric it describes"
+        id: rb_hashes
+        continue-on-error: true
+        run: |
+          python3 - <<'PY' | tee -a /tmp/rb.txt
+          import json
+          REQUIRED = {
+              "src/lobpipeline/return_bench/event_anchored.py",
+              "src/lobpipeline/return_bench/run_event_bench.py",
+          }
+          ev = json.load(open("ci/evidence/return_bench.json"))
+          sources = set(ev.get("sources", {}))
+          missing = REQUIRED - sources
+          for s in sorted(sources):
+              print(f"  hashed: {s}")
+          if missing:
+              raise SystemExit(f"evidence no longer hashes: {sorted(missing)}")
+          m = ev["metrics"]["return_bench"]
+          print(f"  anchored samples: {m['n_anchored']} "
+                f"(rejected as not-a-trade: {m['n_rejected_not_trade']})")
+          print(f"  identity max |dev|: IC {m['identity_max_abs_dev_ic']:.3g}, "
+                f"KS {m['identity_max_ks']:.3g}")
+          print(f"  shuffle-null IC sd: {m['null_ic_sd_max']:.4f}  "
+                f"(direction accuracy under the null: "
+                f"{100*m['null_dir_acc_min']:.1f}-{100*m['null_dir_acc_max']:.1f}%, not 50%)")
+          PY
+      - name: "return-bench: the evidence was recorded for this branch, on a cluster"
+        id: rb_recorded
+        continue-on-error: true
+        run: |
+          python3 - <<'PY' | tee -a /tmp/rb.txt
+          import json, subprocess
+          ev = json.load(open("ci/evidence/return_bench.json"))
+          rec = ev["recorded"]
+          print(f"  recorded {rec['utc']} on {rec['host']} at {rec['commit'][:12]} ({rec['branch']})")
+          def git(*a):
+              return subprocess.run(["git", *a], capture_output=True, text=True)
+          if git("cat-file", "-e", rec["commit"] + "^{commit}").returncode != 0:
+              raise SystemExit(f"recorded commit {rec['commit']} is not in this repository")
+          if git("merge-base", "--is-ancestor", rec["commit"], "HEAD").returncode != 0:
+              raise SystemExit(
+                  f"recorded commit {rec['commit'][:12]} is not an ancestor of HEAD, so this "
+                  "evidence describes a state that is not part of this branch's history")
+          print("  recorded commit is an ancestor of HEAD")
+          host = rec["host"].lower()
+          if host.startswith("fv-az") or "runner" in host or "github" in host:
+              raise SystemExit(
+                  f"host {rec['host']!r} looks like a CI runner. The measurement needs the "
+                  "cluster; a record produced here would be measuring nothing.")
+          print(f"  host {rec['host']} is not a CI runner")
+          PY
+      - name: "return-bench: the metric's own tests pass without jax or a cluster"
+        id: rb_tests
+        continue-on-error: true
+        run: |
+          python -m pytest tests/unit/test_return_bench_event.py \
+                           tests/unit/test_event_bench_end_to_end.py -q | tee -a /tmp/rb.txt
+      - name: "return-bench: planted defects are caught by those tests"
+        id: rb_mutation
+        continue-on-error: true
+        run: python3 ci/mutation_check.py | tee -a /tmp/rb.txt
+
+      # ---- state post-training --------------------------------------------
+      - name: "state-posttraining: gates (stdlib + ast, no imports of the audited code)"
+        id: state_gates
+        continue-on-error: true
+        run: python3 ci/check_state_posttraining.py | tee /tmp/state.txt
+      - name: "state-posttraining: self-test (every gate must fail on its broken copy)"
+        id: state_selftest
+        continue-on-error: true
+        run: |
+          python3 ci/check_state_posttraining.py --self-test | tee -a /tmp/state.txt
+          grep -c "caught" /tmp/state.txt
+      - name: "state-posttraining: install CPU torch"
+        id: state_torch
+        continue-on-error: true
+        run: python3 -m pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
+      - name: "state-posttraining: unit tests (the package's actual behaviour, CPU)"
+        id: state_tests
+        continue-on-error: true
+        run: python3 -m pytest tests/unit/test_state_core.py tests/unit/test_state_posttraining.py -q | tee -a /tmp/state.txt
+
+      # ---- summary and verdict --------------------------------------------
+      - name: Summarise
+        if: always()
+        run: |
+          for f in evidence english legacy lobbench ce mp injection rb state; do
+            { echo "### $f"; echo; echo '```'; tail -n 25 /tmp/$f.txt 2>/dev/null || echo "(no output)"; echo '```'; echo; } >> "$GITHUB_STEP_SUMMARY"
+          done
+          echo "Records under ci/evidence are re-recorded on the cluster with ci/record_evidence.py; see docs/ci-and-evidence.md." >> "$GITHUB_STEP_SUMMARY"
+      - name: Verdict
+        if: always()
+        env:
+          OUTCOMES: >-
+            evidence_selftest=${{ steps.evidence_selftest.outcome }}
+            evidence_audit=${{ steps.evidence_audit.outcome }}
+            english_selftest=${{ steps.english_selftest.outcome }}
+            english=${{ steps.english.outcome }}
+            legacy_selftest=${{ steps.legacy_selftest.outcome }}
+            legacy=${{ steps.legacy.outcome }}
+            lobbench_merge=${{ steps.lobbench_merge.outcome }}
+            lobbench_merge_selftest=${{ steps.lobbench_merge_selftest.outcome }}
+            lobbench_tests=${{ steps.lobbench_tests.outcome }}
+            ce_decomp=${{ steps.ce_decomp.outcome }}
+            ce_decomp_selftest=${{ steps.ce_decomp_selftest.outcome }}
+            ce_decomp_tests=${{ steps.ce_decomp_tests.outcome }}
+            mp_selftest=${{ steps.mp_selftest.outcome }}
+            mp_audit=${{ steps.mp_audit.outcome }}
+            mp_tests=${{ steps.mp_tests.outcome }}
+            mp_report=${{ steps.mp_report.outcome }}
+            injection_exists=${{ steps.injection_exists.outcome }}
+            injection_check=${{ steps.injection_check.outcome }}
+            injection_agree=${{ steps.injection_agree.outcome }}
+            injection_tests=${{ steps.injection_tests.outcome }}
+            rb_exists=${{ steps.rb_exists.outcome }}
+            rb_identity=${{ steps.rb_identity.outcome }}
+            rb_hashes=${{ steps.rb_hashes.outcome }}
+            rb_recorded=${{ steps.rb_recorded.outcome }}
+            rb_tests=${{ steps.rb_tests.outcome }}
+            rb_mutation=${{ steps.rb_mutation.outcome }}
+            state_gates=${{ steps.state_gates.outcome }}
+            state_selftest=${{ steps.state_selftest.outcome }}
+            state_torch=${{ steps.state_torch.outcome }}
+            state_tests=${{ steps.state_tests.outcome }}
+        run: |
+          failed=0
+          for kv in $OUTCOMES; do
+            case "$kv" in *=success) ;; *=skipped) ;; *) echo "FAILED: $kv"; failed=1 ;; esac
+          done
+          [ "$failed" -eq 0 ] && echo "all guards passed" || exit 1

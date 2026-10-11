@@ -1,0 +1,12 @@
+include: model_zoo_smoke_base.yaml
+name: model_zoo_smoke_nsa
+architecture: nsa
+sbatch_job_name: sigma0-smoke-nsa
+env_ARCHITECTURE: nsa
+env_N_HEADS: 4
+env_D_FF: 128
+env_BLOCK_SIZE: 26
+env_BLOCK_COUNTS: 2
+env_WINDOW_SIZE: 52
+env_ATTENTION_MAX_CACHE_LEN: 416
+env_PE_TYPE: rope

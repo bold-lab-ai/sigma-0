@@ -1,0 +1,14 @@
+# Canonical DATA symlinks for a sigma-0 fork. bootstrap_fork.sh creates them;
+# to add one by hand:
+#   ln -sfn <target> data/<link_name>
+# ALWAYS verify the target is readable from your account first (exact-path
+# stat / small ls only — no find, no recursive ls on /lus).
+# All three targets below verified readable from alexbismuth.u6gb on 2026-07-15.
+# Exclusions policy: private-project paths (/lus/lfs1aip2/projects/s5e/...,
+# i.e. NOT under projects/public/) are typically NOT traversable from u6gb
+# accounts — do not add such targets without a fresh readability check.
+# No candidate target was excluded in this revision (all three passed).
+# Columns: link_name<TAB>target<TAB>note
+SP500-2022-2025	/projects/public/s5e/quant_team/lob_preproc_sp500_squashfs	Monthly SquashFS shards shard_YYYY-MM.squashfs + index_YYYY-MM.json (L10 canonical npy per ticker inside each shard). Already tracked in this repo at data/SP500-2022-2025. Mount via $BENCHMARK_ROOT/pipeline/_squashfs_helpers.sh (the copy the launchers source) — never raw-scan.
+GOOG_data_npy	/lus/lfs1aip2/projects/u6gb/quant/Mamba3_GOOG_pretraining_runs/data_npy	Pre-decompressed paired message/orderbook .npy per day under GOOG/ (+ decompress_done.json breadcrumb). Training fastpath for GOOG 2022-2025 pretraining/post-training (the lustre_npy DATA_MODE).
+GOOG2016TO2021	/lus/lfs1aip2/projects/public/s5e/quant_team/quant/GOOG2016TO2021	Historical GOOG LOBSTER data, year subdirectories. CAUTION: despite the name, the dir currently contains 2020/2021/2022 subdirs (verified 2026-07-15); owner kangli.s5e, world-readable. Check year coverage before relying on it.

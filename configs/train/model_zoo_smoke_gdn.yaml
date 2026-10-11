@@ -1,0 +1,8 @@
+include: model_zoo_smoke_base.yaml
+name: model_zoo_smoke_gdn
+architecture: gdn
+sbatch_job_name: sigma0-smoke-gdn
+env_ARCHITECTURE: gdn
+env_GDN_NUM_HEADS: 4
+env_GDN_HEAD_DIM: 16
+env_GDN_CHUNK_SIZE: 16

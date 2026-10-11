@@ -1,0 +1,55 @@
+{
+  "assertions": [
+    {
+      "metric": "register.entries_without_observable",
+      "name": "every live defect names an observable",
+      "op": "==",
+      "value": 0,
+      "why": "an entry that cannot say which number would move if it fired is a suspicion, not a defined problem"
+    },
+    {
+      "metric": "register.bound_outside_class_o",
+      "name": "BOUND is claimed only where it can be true",
+      "op": "==",
+      "value": 0,
+      "why": "outside the observation class, calling something a bound is an excuse for not fixing it, and it stops other people trying"
+    },
+    {
+      "metric": "register.total",
+      "name": "the defect count does not shrink by deletion",
+      "op": ">=",
+      "value": 31,
+      "why": "entries are never deleted; a REFUTED entry is the record that stops an investigation being repeated"
+    }
+  ],
+  "kind": "register",
+  "metrics": {
+    "register": {
+      "bound": 1,
+      "bound_outside_class_o": 0,
+      "entries_without_observable": 0,
+      "fixed": 25,
+      "open": 2,
+      "open_ids": [
+        "D-R1",
+        "D-X9"
+      ],
+      "open_without_measurement": [],
+      "refuted": 3,
+      "total": 31
+    }
+  },
+  "recorded": {
+    "branch": "feat/cleanup-2-src-layout",
+    "commit": "ae69feea3c818af8ea649d4cf836072fcd4c64bb",
+    "host": "login43",
+    "platform": "aarch64",
+    "python": "3.12.11",
+    "utc": "2026-09-05T23:13:25Z"
+  },
+  "sources": {
+    "docs/defect_register.json": "434fcfdbe4f7dc2c18c826173dcae3818ab1f8fea2e706cdc1bbb029e4b12059",
+    "tests/unit/test_defect_register.py": "52d43e58bceba7416967ee44d4ce06938805b8d9312d31ad9e6db145e43a9437",
+    "tools/render_register.py": "db5314ca247fa2f7be93016817106bbae643343f3619b66b7e719c0bc3c0c1f0"
+  }
+}

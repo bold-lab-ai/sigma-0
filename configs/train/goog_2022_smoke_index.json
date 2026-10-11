@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "shard": "GOOG2016TO2021/2022-smoke",
+  "n_files": 10,
+  "shapes": {
+    "2022/GOOG_2022-01-03_34200000_57600000_message_10_proc.npy": {
+      "shape": [
+        1290565,
+        14
+      ],
+      "dtype": "int64"
+    },
+    "2022/GOOG_2022-01-03_34200000_57600000_orderbook_10_proc.npy": {
+      "shape": [
+        1290566,
+        41
+      ],
+      "dtype": "int64"
+    },
+    "2022/GOOG_2022-01-04_34200000_57600000_message_10_proc.npy": {
+      "shape": [
+        564235,
+        14
+      ],
+      "dtype": "int64"
+    },
+    "2022/GOOG_2022-01-04_34200000_57600000_orderbook_10_proc.npy": {
+      "shape": [
+        564236,
+        41
+      ],
+      "dtype": "int64"
+    },
+    "2022/GOOG_2022-01-05_34200000_57600000_message_10_proc.npy": {
+      "shape": [
+        1675291,
+        14
+      ],
+      "dtype": "int64"
+    },
+    "2022/GOOG_2022-01-05_34200000_57600000_orderbook_10_proc.npy": {
+      "shape": [
+        1675292,
+        41
+      ],
+      "dtype": "int64"
+    },
+    "2022/GOOG_2022-01-06_34200000_57600000_message_10_proc.npy": {
+      "shape": [
+        584125,
+        14
+      ],
+      "dtype": "int64"
+    },
+    "2022/GOOG_2022-01-06_34200000_57600000_orderbook_10_proc.npy": {
+      "shape": [
+        584126,
+        41
+      ],
+      "dtype": "int64"
+    },
+    "2022/GOOG_2022-01-07_34200000_57600000_message_10_proc.npy": {
+      "shape": [
+        519934,
+        14
+      ],
+      "dtype": "int64"
+    },
+    "2022/GOOG_2022-01-07_34200000_57600000_orderbook_10_proc.npy": {
+      "shape": [
+        519935,
+        41
+      ],
+      "dtype": "int64"
+    }
+  }
+}
