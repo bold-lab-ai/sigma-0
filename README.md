@@ -78,3 +78,15 @@ name through `lobpipeline.model_store` (`docs/checkpoints.md`).
 | understand why CI is red | `docs/ci-and-evidence.md` |
 | work in the shared checkout or attach to an allocation | `docs/shared-checkout.md` |
 | see what was tried and where the results are | `docs/experiments/README.md` |
+
+## Citation
+
+```bibtex
+@misc{an2026sigma0,
+      title={{Sigma-0}: Unlock Large Scale Quant Foundation Model},
+      author={Junming An and Kang Li and Aramis Marti-Shahandeh and Alexandre Bismuth and Sascha Frey and Yuhe Gao and Valentin Mohl and George Nigmatulin and Aaron Rose and Bidipta Sarkar and Mihai Cucuringu and Stefan Zohren and Leandro S{\'a}nchez-Betancourt and Ani Calinescu and Jakob Nicolaus Foerster},
+      year={2026},
+      howpublished={\url{https://github.com/bold-lab-ai/sigma-0}},
+      url={https://github.com/bold-lab-ai/sigma-0},
+}
+```
