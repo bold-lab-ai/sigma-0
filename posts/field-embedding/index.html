@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="author" content="Bold.ai">
+  <meta name="description" content="Four mathematical reasons why a separate embedding table per field beats a learned encoder for structured order-book events, and when it does not.">
+  <meta name="theme-color" content="#ffffff">
+  <title>Why Per-Field Embeddings Often Beat a Learned Encoder</title>
+  <link rel="icon" href="../../favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="../../vendor/katex/katex.min.css">
+  <link rel="stylesheet" href="../../site.css">
+  <script defer src="../../vendor/katex/katex.min.js"></script>
+  <script defer src="../../math.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="post-head">
+    <p class="crumb"><a href="../../">sigma-0 blog</a></p>
+    <h1>Why Per-Field Embeddings Often Beat a Learned Encoder</h1>
+    <p class="meta"><time>2026-10-18</time><span class="chip">embedding</span><span class="chip">transformer</span><span class="chip">representation learning</span><span class="chip">financial sequence modelling</span></p>
+  </header>
+  <article class="prose">
+<p>When you feed structured events into a Transformer, for example an order-book action made of side, type, price level and size, there are two common designs:</p>
+<ul>
+<li>give each field its own embedding table, then add or concatenate the vectors you look up;</li>
+<li>pass the whole action through an encoder (for example an MLP) that outputs one embedding.</li>
+</ul>
+<p>In practice the first design usually works better. This post explains why from four angles: expressiveness, optimisation, statistical efficiency and geometry. It ends with the cases where the conclusion flips.</p>
+<h2>0. Setup</h2>
+<p>An action has <span class="math inline">K</span> discrete fields, such as side, type, price level and size bucket. Field <span class="math inline">i</span> takes a value <span class="math inline">x_i \in \{1,\dots,V_i\}</span>.</p>
+<p><strong>Option A (one embedding per field):</strong></p>
+<div class="math block">
+h = \sum_{i=1}^K E_i[x_i] \quad\text{or}\quad h=[E_1[x_1];\dots;E_K[x_K]],\qquad E_i\in\mathbb{R}^{V_i\times d}
+</div>
+<p><strong>Option B (encoder):</strong> <span class="math inline">h = f_\theta(x)</span>, where <span class="math inline">f_\theta</span> is an MLP or another network. Its input is either the raw numbers or the concatenated field features.</p>
+<h2>1. With a linear first layer, the two are the same</h2>
+<p>Concatenate the one-hot vectors of all fields into <span class="math inline">u=[e_{x_1};\dots;e_{x_K}]</span> and apply one linear layer:</p>
+<div class="math block">
+Wu = \sum_i W_i\, e_{x_i} = \sum_i W_i[:,x_i]
+</div>
+<p>This is exactly the sum embedding of Option A.</p>
+<p>So with one-hot input, the first layer of the encoder already is &quot;one embedding per field, then add&quot;. All the encoder adds is the nonlinear layers after it. The real differences come from the three places below.</p>
+<h2>2. When the encoder reads raw numbers: spectral bias of MLPs</h2>
+<p>Suppose price and size go into the MLP as <strong>scalars</strong>, so <span class="math inline">h=f_\theta(p)</span>. Compare two ways to map a value to a vector:</p>
+<ul>
+<li><strong>Lookup</strong>: every value gets its own free vector <span class="math inline">E[p]</span>. This can represent any function <span class="math inline">g:\{1,\dots,V\}\to\mathbb{R}^d</span> with <span class="math inline">Vd</span> parameters and assumes nothing about the function's shape.</li>
+<li><strong>ReLU MLP</strong>: the output is piecewise linear in <span class="math inline">p</span>. If <span class="math inline">g</span> has <span class="math inline">m</span> &quot;kinks&quot; (non-monotone points or jumps) over the <span class="math inline">V</span> values, you need about <span class="math inline">m</span> hidden units to fit it. MLPs also have a known spectral bias: a component with frequency <span class="math inline">k</span> is learned slowly, roughly <span class="math inline">1/k^2</span> times as fast.</li>
+</ul>
+<p>Prices and sizes in financial data are exactly <strong>high-frequency and non-smooth</strong>. Round prices, tick boundaries and round lots (100, 500, 1000 shares) each carry their own meaning. For example, size = 100 and size = 101 mean very different things, but to an MLP the two inputs are nearly identical, so its outputs are nearly identical too. A lookup table does not have this problem: neighbouring values can learn completely different vectors.</p>
+<p>Heavy-tailed values such as size make it worse. The scale of <span class="math inline">w\cdot p</span> is dominated by extreme values, and so are the gradients. A lookup over buckets does not depend on scale at all.</p>
+<h2>3. Optimisation: lookup gradients are decoupled</h2>
+<p>In Option A, the gradient only touches the rows that actually appear in the batch:</p>
+<div class="math block">
+\frac{\partial L}{\partial E_i[v]} = \sum_{n:\,x_i^{(n)}=v} \frac{\partial L}{\partial h^{(n)}}
+</div>
+<p>Parameters for different rows and different fields are not coupled. This means:</p>
+<ul>
+<li>the Hessian is roughly <strong>block-diagonal</strong> and well conditioned, so Adam's per-parameter scaling is almost the right preconditioner;</li>
+<li>rare values have their own parameters, so their gradients are not drowned out by frequent values.</li>
+</ul>
+<p>In Option B all inputs share <span class="math inline">\theta</span>, and the gradient is a sum over all samples:</p>
+<div class="math block">
+\nabla_\theta L=\sum_n J_\theta\big(x^{(n)}\big)^\top \frac{\partial L}{\partial h^{(n)}}
+</div>
+<p>Frequent values dominate the update direction, fields interfere with each other, and the Hessian is dense, so optimisation is harder.</p>
+<h2>4. Statistics: additive decomposition and sample complexity</h2>
+<p>If you view the encoder as modelling the whole combination of fields, its most flexible form gives every combination its own token, with <span class="math inline">\prod_i V_i\, d</span> parameters. Option A has <span class="math inline">\sum_i V_i\, d</span>.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th></th>
+<th>Parameters</th>
+<th>Training samples per parameter (total <span class="math inline">N</span>)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Joint token / tightly coupled encoder</td>
+<td><span class="math inline">\prod_i V_i\,d</span></td>
+<td><span class="math inline">\sim N/\prod_i V_i</span></td>
+</tr>
+<tr>
+<td>One embedding per field</td>
+<td><span class="math inline">\sum_i V_i\,d</span></td>
+<td><span class="math inline">\sim N/V_i</span></td>
+</tr>
+</tbody>
+</table></div>
+<p>Example: with <span class="math inline">V=(2,4,20,30)</span>, <span class="math inline">\prod_i V_i=4800</span> and <span class="math inline">\sum_i V_i=56</span>. Write <span class="math inline">P</span> for the parameter count. Using the rough estimation error <span class="math inline">\sim\sqrt{P/N}</span>, the error differs by about <span class="math inline">\sqrt{4800/56}\approx 9</span> times.</p>
+<p>The key point is that Option A only models first-order (additive) effects at the <strong>input layer</strong>. Interactions between fields (for example side × price level) are left to the Transformer that follows. The Transformer learns those interactions with attention and FFN layers, and it learns them <strong>in context</strong>, which is more efficient than learning them for each action in isolation inside an encoder. This is an &quot;additive first, interactions later&quot; decomposition:</p>
+<div class="math block">
+p(y\mid x)\approx F\Big(\sum_i E_i[x_i],\ \mathrm{context}\Big)
+</div>
+<p>The assumption behind it is that most of the signal is a sum of per-field main effects and interactions matter less. This usually holds on real data, so you get small bias and much smaller variance.</p>
+<h2>5. Geometry: each field lives in a nearly orthogonal subspace</h2>
+<p>With <strong>concatenation</strong>, each field sits in its own exactly orthogonal subspace. The attention score</p>
+<div class="math block">
+q^\top k = \sum_{i,j} E_i[x_i]^\top W_Q^\top W_K\, E_j[x'_j]
+</div>
+<p>splits into field-by-field blocks. The model can attend to just one field, for example compare only price levels, by learning zero weights for the other blocks.</p>
+<p>With <strong>summation</strong>, randomly initialised vectors in high dimension <span class="math inline">d</span> are nearly orthogonal, with inner products of order <span class="math inline">O(1/\sqrt d)</span>. The fields therefore stay approximately separable, and a downstream linear layer can &quot;read them back out&quot;.</p>
+<p>An encoder's nonlinearity <strong>entangles</strong> the fields, so the downstream layers have to disentangle them before they can use a single field.</p>
+<h2>6. When an encoder is better (caveats)</h2>
+<ol>
+<li>A numeric field has very many values and really is smooth (for example continuous prices, with unseen values at test time). A lookup cannot extrapolate, so an MLP or &quot;bucket embedding + numeric feature&quot; works better.</li>
+<li>The encoder's <span class="math inline">d</span> is smaller than the number of fields times the dimension each field needs, i.e. there is a bottleneck. The encoder may then lose because of capacity, not because of the method.</li>
+<li>When comparing the two, make sure parameter counts and training steps are comparable. Otherwise Option A may win only because it has more parameters.</li>
+</ol>
+<h2>Summary</h2>
+<p>A lookup is a non-parametric estimate for each discrete value: no smoothness assumption, decoupled gradients. Splitting by field is an additive decomposition at the input layer that cuts parameters from <span class="math inline">\prod_i V_i</span> to <span class="math inline">\sum_i V_i</span> and leaves interactions to the Transformer, which sees context. An encoder adds both a smoothness bias (bad for the discrete, high-frequency meaning of financial fields) and parameter coupling (harder to optimise), so it usually does worse.</p>
+  </article>
+  <footer><a href="../../">sigma-0 blog</a> · <a href="https://github.com/bold-lab-ai/sigma-0">github.com/bold-lab-ai/sigma-0</a></footer>
+</div>
+</body>
+</html>

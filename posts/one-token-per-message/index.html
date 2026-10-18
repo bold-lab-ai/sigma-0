@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="author" content="Bold.ai">
+  <meta name="description" content="Compressing each order-book message into a single Transformer position makes pretraining about 100 times cheaper and raises return-prediction Pearson from 0.203 to 0.263.">
+  <meta name="theme-color" content="#ffffff">
+  <title>One Token per Message: 100× Cheaper Pretraining, Better Return Prediction</title>
+  <link rel="icon" href="../../favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="../../vendor/katex/katex.min.css">
+  <link rel="stylesheet" href="../../site.css">
+  <script defer src="../../vendor/katex/katex.min.js"></script>
+  <script defer src="../../math.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="post-head">
+    <p class="crumb"><a href="../../">sigma-0 blog</a></p>
+    <h1>One Token per Message: 100× Cheaper Pretraining, Better Return Prediction</h1>
+    <p class="meta"><time>2026-10-18</time><span class="chip">order book</span><span class="chip">tokenization</span><span class="chip">return prediction</span><span class="chip">transformer</span></p>
+  </header>
+  <article class="prose">
+<p>Our order-book language model reads the market as a stream of messages: new orders, cancellations, deletions and executions. Until now each message was split into 26 sub-tokens (event type, direction, price digits, size digits, time, …), and the Transformer saw every one of them as its own position. That is the natural choice if you want to <em>generate</em> messages. But if the goal is to <em>predict returns</em>, it may be wasteful.</p>
+<p>This post tests the simplest alternative: <strong>give each message one position</strong>. With the same pretraining compute and fine-tuning data, the one-token model predicts the mid-price return 128 messages ahead with a test Pearson of <strong>0.263</strong>, against <strong>0.203</strong> for the 26-token model, and pretraining one pass over the data costs about <strong>10 GPU-hours instead of 1,100</strong>.</p>
+<h2>1. The idea</h2>
+<p><img src="figures/fig1_three_embeddings.png" alt="Figure 1: three ways to embed a message" /></p>
+<p>Figure 1 shows three ways to feed a message to the Transformer: (1) every field is its own position, the model we had so far; (2) the whole message is one position, the model tested here; (3) a small encoder pools the message into one fixed-size vector. This post compares (1) and (2).</p>
+<p><strong>Input: one vector per message.</strong> All 26 field values of a message are still read; nothing is dropped. They are compressed <em>before</em> the Transformer into one vector, the sum of two parts:</p>
+<ul>
+<li>a <strong>coarse token</strong>, a lookup over 1,152 kinds that summarise the message (Section 2);</li>
+<li>the <strong>field values</strong>: each of the 26 field values gets a 32-dimensional lookup, these are concatenated and passed through a small two-layer MLP. Its last layer starts at zero, so training begins from the coarse token alone.</li>
+</ul>
+<p><strong>Target: the next message's coarse token.</strong> Each position predicts one of 1,152 classes, so there is one loss per message instead of 26. The field values are input only.</p>
+<p><strong>Everything else is unchanged.</strong> The Transformer (width 512, 6 layers) and the regression head that reads the last position to predict returns are the same as in the 26-token model. The whole model has 22.1 M parameters, against 29.2 M for the 26-token model; the difference is the output side.</p>
+<p>What we give up: the model can no longer generate full messages, so it cannot roll out a simulated market. For return prediction we do not need that.</p>
+<h2>2. The coarse token</h2>
+<p>The coarse token is computed from the message's own fields, so no change to the data pipeline is needed.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Bins</th>
+<th>Count</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Event</td>
+<td>new order, cancellation, deletion, execution</td>
+<td>4</td>
+</tr>
+<tr>
+<td>Direction</td>
+<td>buy, sell</td>
+<td>2</td>
+</tr>
+<tr>
+<td>Price vs. mid</td>
+<td>above, at or below</td>
+<td>2</td>
+</tr>
+<tr>
+<td>Price distance (ticks)</td>
+<td>0, 1, 2, 3, 4–5, 6–10, 11–50, 51–200, &gt; 200</td>
+<td>9</td>
+</tr>
+<tr>
+<td>Size (shares)</td>
+<td>&lt; 50, 50–99, 100–199, ≥ 200</td>
+<td>4</td>
+</tr>
+<tr>
+<td>Round lot</td>
+<td>size is a multiple of 100</td>
+<td>2</td>
+</tr>
+<tr>
+<td><strong>Total</strong></td>
+<td><span class="math inline">4 \times 2 \times 2 \times 9 \times 4 \times 2</span></td>
+<td><strong>1,152</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p>The price bins reach far from the mid because price distances have a long tail (median 271 ticks). On 372 thousand real messages, 403 of the 1,152 kinds occur.</p>
+<h2>3. Why it is so much faster</h2>
+<p><img src="figures/fig2_throughput.png" alt="Figure 2: measured training throughput by context length" /></p>
+<p>A window of <span class="math inline">N</span> messages becomes <span class="math inline">N</span> positions instead of <span class="math inline">26N</span>. Attention cost grows with the square of the sequence length, so the saving grows with context:</p>
+<div class="math block">
+\frac{\text{cost}_{26}}{\text{cost}_{1}} \;\approx\; \frac{(26N)^2}{N^2} = 676 \quad \text{(attention only)},
+</div>
+<p>while the per-position parts (embeddings, MLPs) shrink by about 26 times. Measured end to end, data loading included, on 8 GH200 GPUs with the same batch of 80 windows:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th></th>
+<th>26 tokens per message</th>
+<th>One token per message</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Messages per second at 4,096-message context</td>
+<td>22.9 thousand</td>
+<td>2.51 million</td>
+</tr>
+<tr>
+<td>GPU-hours per pass over 11.2 billion training messages</td>
+<td>~1,100</td>
+<td>~10</td>
+</tr>
+<tr>
+<td>Passes in 80 GPU-hours</td>
+<td>0.11</td>
+<td>~8</td>
+</tr>
+</tbody>
+</table></div>
+<p>The speed-up is 9× at a 512-message context and 110× at 4,096. In other words, with the compute budget the 26-token model used to see a tenth of the data once, the one-token model can see all of it several times.</p>
+<h2>4. Return prediction</h2>
+<p>At a decision point the model has read the last 3,968 messages of one stock and predicts the mid-price return 128 messages later. We score both models on the same 70,183 test decisions (432 US stocks, January 2026), with the <strong>same pretraining compute (80 GPU-hours)</strong> and the <strong>same fine-tuning data</strong>.</p>
+<p><img src="figures/fig3_return_compare.png" alt="Figure 3: return-prediction Pearson, 26 tokens per message against one token per message" /></p>
+<p><strong>One token per message predicts returns about 30% better: Pearson 0.263 against 0.203.</strong></p>
+  </article>
+  <footer><a href="../../">sigma-0 blog</a> · <a href="https://github.com/bold-lab-ai/sigma-0">github.com/bold-lab-ai/sigma-0</a></footer>
+</div>
+</body>
+</html>
