@@ -1,0 +1,52 @@
+# Policy bench
+
+Evaluate one trading policy against a fixed simulator and a fixed signal, and
+report its result. Policy search is a separate client of this package.
+
+- Simulator: nano-sigma `newtok_a_r1` (best LOB-Bench on the nano-sigma board).
+- Signal: nano-sigma `returnft_lobert_pass1` (best return and PnL bench).
+- Data: `dataset_q4_2025_jan2026_v3`. Dev is January 2026, test is February 2026.
+
+The state is the L3 order book plus the message log, not tokens. Each model
+encodes its own input from that state.
+
+## Modules
+
+| Module | What it does |
+|---|---|
+| `book.py` | L3 book. FIFO queue per price, an owner (background or agent) on every order. Updated by order id for real data and by queue slot for generated messages. |
+| `daydata.py` | One stock-day of the v3 dataset and the replay that rebuilds its full book from the stored snapshots. |
+| `codec.py` | The newtok `Message`: `encode` (identical to nano-sigma's `encode_window`) and a strict `decode`. |
+| `rules.py` | Legality of a background message in a book (what the sampler rejects), and how a legal message changes the book. |
+| `nanosigma/` | Vendored nano-sigma encoding code, byte for byte. See `nanosigma/PROVENANCE.md`. |
+
+## Rules a background message obeys
+
+- New orders do not cross the opposite best.
+- A cancel or delete names one background order by queue slot. Agent orders
+  count in the numbering but can never be named. QSLOT 99 means slot 99 or
+  later.
+- Executions walk one side from the best price, take inner levels whole, and
+  are filled front of queue first. That is the only way an agent order is
+  filled by background flow.
+
+## Known approximation: strict FIFO
+
+Real executions are not always front of queue first. On the 40 January
+stock-days of job 7832642, 96.2% of execution messages (180,489 of 187,678)
+fill exactly the orders a front-first walk predicts. The other 3.8% skip an
+older order at the level, typically a 100-share order skipped by an aggressor
+smaller than 100 shares. The cause is not in the data. Orders with a minimum
+execution quantity would explain it, but that is unverified.
+
+The bench keeps strict FIFO. For an agent order this is conservative: it is
+never filled ahead of an older order, which in real markets it sometimes is.
+
+## Gates
+
+| Gate | Check | Where |
+|---|---|---|
+| G1 | Real-day replay: queue slots equal `<stem>_queue.npy`, top 10 levels equal the L10 file, every snapshot equals the stored one | `run/post_training/policy_bench/check_book_codec.py` |
+| G2 | `encode_stream` equals `encode_window`; decode inverts encode up to clipping; real messages pass `rules.check`; a slot-driven book stays equal to the id-driven one | same script |
+
+Unit tests: `tests/unit/test_policy_bench_*.py`.
