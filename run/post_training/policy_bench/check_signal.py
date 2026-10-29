@@ -106,8 +106,8 @@ def _ours_item(arg):
     e, s = arg
     P = G["P"]
     day = DayFiles.open(G["root"], e)
-    msg = np.asarray(day.messages[:s + P])
-    reg = AddRegistry.from_rows(msg[:s])
+    reg = AddRegistry.from_rows(day.messages[:s])
+    win = np.asarray(day.messages[s:s + P])
     bk = day.book_before(s)
     l10 = np.zeros((P + 1, 43), np.int64)
     l10[0] = day.l10[s]
@@ -117,17 +117,17 @@ def _ours_item(arg):
     c = Counter()
     for r, _ in day.replay(bk, s, s + P):
         k = r - s
-        f = msg[r]
+        f = win[k]
         rows[k] = processed_row(*(int(x) for x in f[[0, 1, 2, 3, 5, 6, 7, 8, 9]]), l10[k], reg, clip)
         reg.observe(rows[k])
         l10[k + 1] = w.next_row(bk, int(f[8]), int(f[9]))
-    bad = rows != msg[s:s + P]
+    bad = rows != win
     for col in np.nonzero(bad.any(0))[0]:
         c[f"msg_col{col}_bad"] += int(bad[:, col].sum())
     lbad = l10 != np.asarray(day.l10[s:s + P + 1])
     for col in np.nonzero(lbad.any(0))[0]:
         c[f"l10_col{col}_bad"] += int(lbad[:, col].sum())
-    t1, b1 = encode_messages(msg[s:s + P]), book_features(np.asarray(day.l10[s:s + P + 1]))
+    t1, b1 = encode_messages(win), book_features(np.asarray(day.l10[s:s + P + 1]))
     t2, b2 = encode_messages(rows), book_features(l10)
     c["rows"] += P
     c["tokens_equal"] += int(np.array_equal(t1, t2))

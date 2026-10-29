@@ -46,13 +46,18 @@ class AddRegistry:
         self._ref: dict[int, tuple[int, int, int, int]] = {}
 
     @classmethod
-    def from_rows(cls, msg: np.ndarray) -> "AddRegistry":
-        """The registry after the processed rows `msg` (e.g. rows 0..s of a day)."""
+    def from_rows(cls, msg: np.ndarray, chunk: int = 1 << 20) -> "AddRegistry":
+        """The registry after the processed rows `msg` (e.g. rows 0..s of a day).
+        Reads in chunks, so `msg` can be a memory map of a whole day."""
         reg = cls()
-        msg = np.asarray(msg)
-        adds = msg[msg[:, C_EVT] == 1]
-        oid, first = np.unique(adds[:, C_OID], return_index=True)
-        for o, r in zip(oid.tolist(), adds[first][:, [C_PRICE_REL, C_SIZE, C_TS, C_TNS]].tolist()):
+        cols = [C_OID, C_PRICE_REL, C_SIZE, C_TS, C_TNS]
+        parts = []
+        for lo in range(0, len(msg), chunk):
+            m = np.asarray(msg[lo:lo + chunk])
+            parts.append(m[m[:, C_EVT] == 1][:, cols])
+        adds = np.concatenate(parts) if parts else np.zeros((0, len(cols)), np.int64)
+        oid, first = np.unique(adds[:, 0], return_index=True)
+        for o, r in zip(oid.tolist(), adds[first][:, 1:].tolist()):
             reg._ref[o] = tuple(r)
         return reg
 
