@@ -219,3 +219,39 @@ class Book:
         for o in self._q[side][price]:
             del self._loc[o.oid]
         self._drop_level(side, price)
+
+
+class L10Writer:
+    """Full 43-column L10 rows, as the data files hold them (job 7832710, 100%):
+
+        col 0      change of the mid since the previous row, in ticks. The mid is
+                   (ask1 + bid1) / 2 rounded half to even to a tick; an empty side
+                   carries its last price forward
+        cols 1, 2  time (s, ns) of the previous row's message
+        cols 3..   Book.l10()
+
+    One call per row: `next_row` after a row has been applied gives the row of
+    the book before the next message. A side that has been empty since `first`
+    gives col 0 = 0 (the file's value there is unknown).
+    """
+
+    def __init__(self, first: np.ndarray) -> None:
+        self._ask = self._bid = None
+        self._mid = self._observe(int(first[3]), int(first[5]))
+
+    def next_row(self, book: Book, t_s: int, t_ns: int) -> np.ndarray:
+        body = book.l10()
+        mid = self._observe(int(body[0]), int(body[2]))
+        d = 0 if mid is None or self._mid is None else int(mid - self._mid)
+        self._mid = mid
+        return np.concatenate([np.array([d, t_s, t_ns], dtype=np.int64), body])
+
+    def _observe(self, ask: int, bid: int) -> float | None:
+        if ask < EMPTY_ASK_PRICE:
+            self._ask = ask
+        if bid > EMPTY_BID_PRICE:
+            self._bid = bid
+        if self._ask is None or self._bid is None:
+            return None
+        # the expression the files were verified against, float rounding included
+        return float(np.round((self._ask + self._bid) / 2, -2)) / 100

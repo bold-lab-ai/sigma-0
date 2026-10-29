@@ -14,9 +14,10 @@ encodes its own input from that state.
 
 | Module | What it does |
 |---|---|
-| `book.py` | L3 book. FIFO queue per price, an owner (background or agent) on every order. Updated by order id for real data and by queue slot for generated messages. |
+| `book.py` | L3 book. FIFO queue per price, an owner (background or agent) on every order. Updated by order id for real data and by queue slot for generated messages. `L10Writer` gives the 43-column L10 row the models read. |
 | `daydata.py` | One stock-day of the v3 dataset and the replay that rebuilds its full book from the stored snapshots. |
 | `codec.py` | The newtok `Message`: `encode` (identical to nano-sigma's `encode_window`) and a strict `decode`. |
+| `simulator.py` | The newtok model with a KV cache: feed positions in chunks or one at a time, cut back a rejected message. |
 | `rules.py` | Legality of a background message in a book (what the sampler rejects), and how a legal message changes the book. |
 | `nanosigma/` | Vendored nano-sigma encoding code, byte for byte. See `nanosigma/PROVENANCE.md`. |
 
@@ -48,5 +49,14 @@ never filled ahead of an older order, which in real markets it sometimes is.
 |---|---|---|
 | G1 | Real-day replay: queue slots equal `<stem>_queue.npy`, top 10 levels equal the L10 file, every snapshot equals the stored one | `run/post_training/policy_bench/check_book_codec.py` |
 | G2 | `encode_stream` equals `encode_window`; decode inverts encode up to clipping; real messages pass `rules.check`; a slot-driven book stays equal to the id-driven one | same script |
+| G3 | The vendored simulator reproduces `newtok_a_r1`'s test CE on its 939 test windows; our book gives byte-identical model inputs; the KV cache equals the full forward | `run/post_training/policy_bench/check_simulator.py` |
 
 Unit tests: `tests/unit/test_policy_bench_*.py`.
+
+## Precision
+
+The simulator runs in bf16 autocast, as nano-sigma trained and evaluated it.
+In float32 the KV cache equals the full forward (max logit difference 3e-4,
+job 7835151). In bf16 the two use different attention kernels, so logits
+differ by up to about 2.5 and 1% of argmaxes flip, while the CE agrees to
+1e-4. A rollout is reproducible only on the same code path and kernels.

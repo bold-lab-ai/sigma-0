@@ -27,7 +27,7 @@ MID = 1_000_000
 def test_vendored_files_match_their_provenance_hashes():
     table = dict(re.findall(r"\| `(\w+\.py)` \| [^|]+ \| `([0-9a-f]{64})` \|",
                             (VENDORED / "PROVENANCE.md").read_text()))
-    assert set(table) == {"data.py", "newtok.py"}
+    assert set(table) == {"data.py", "newtok.py", "model.py", "model_newtok.py"}
     for name, sha in table.items():
         assert hashlib.sha256((VENDORED / name).read_bytes()).hexdigest() == sha, name
 
