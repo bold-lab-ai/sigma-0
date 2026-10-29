@@ -18,6 +18,7 @@ encodes its own input from that state.
 | `daydata.py` | One stock-day of the v3 dataset and the replay that rebuilds its full book from the stored snapshots. |
 | `codec.py` | The newtok `Message`: `encode` (identical to nano-sigma's `encode_window`) and a strict `decode`. |
 | `simulator.py` | The newtok model with a KV cache: feed positions in chunks or one at a time, cut back a rejected message. |
+| `signal.py` | The return signal: processed rows from our book (`price_rel`, the reference columns), and the fine-tuned head's prediction at a decision. |
 | `rules.py` | Legality of a background message in a book (what the sampler rejects), and how a legal message changes the book. |
 | `nanosigma/` | Vendored nano-sigma encoding code, byte for byte. See `nanosigma/PROVENANCE.md`. |
 
@@ -50,8 +51,22 @@ never filled ahead of an older order, which in real markets it sometimes is.
 | G1 | Real-day replay: queue slots equal `<stem>_queue.npy`, top 10 levels equal the L10 file, every snapshot equals the stored one | `run/post_training/policy_bench/check_book_codec.py` |
 | G2 | `encode_stream` equals `encode_window`; decode inverts encode up to clipping; real messages pass `rules.check`; a slot-driven book stays equal to the id-driven one | same script |
 | G3 | The vendored simulator reproduces `newtok_a_r1`'s test CE on its 939 test windows; our book gives byte-identical model inputs; the KV cache equals the full forward | `run/post_training/policy_bench/check_simulator.py` |
+| G4 | The vendored signal reproduces the board's Pearson@128 on the 70,183 January test decisions; processed rows rebuilt from our book equal the files | `run/post_training/policy_bench/check_signal.py` |
 
 Unit tests: `tests/unit/test_policy_bench_*.py`.
+
+## Data for the two models
+
+The simulator was trained on the `v2_20261013` shards, the signal on the
+`bookfix20261012` shards. On January 2026 the two are byte-identical except
+for 8 META stock-days, which are truncated in bookfix (job 7836700). The
+bench reads `v2_20261013`. G4 scores the signal on bookfix so that its
+reference number is reproduced as published.
+
+The processed rows come from two preprocessing runs. Regular-session files
+(`*_34200000_57600000_*`) clip `price_rel` at +-999 ticks, the others do not
+(jobs 7837738, 7837813, 7837914). `signal.price_rel_clip` reads the convention from the
+file name.
 
 ## Precision
 
