@@ -158,3 +158,19 @@ def test_replay_reuses_the_days_book_with_the_same_result(tmp_path):
     for f in ("mid", "l10_end", "fills"):
         np.testing.assert_array_equal(getattr(reused[1], f), getattr(fresh[0], f))
     assert reused[1].mid.tolist() == [10_050.0, 10_150.0, 10_150.0]
+
+
+def test_skew_quoter_keeps_good_quotes_and_leans_with_the_signal():
+    from post_training.policy_bench.policies import SkewQuoter
+    from post_training.policy_bench.types import Cancel, Obs
+
+    book = _l10(10_100, 5, 10_000, 5)
+    q = SkewQuoter(index=0, size=100, threshold=0.5, cap=150)
+    both = q.step(Obs(0, 0, 0, book, 0, 0.0, [], [], np.array([0.1])))
+    assert both == [LimitOrder(BUY, 10_000, 100), LimitOrder(SELL, 10_100, 100)]
+    # a rise is predicted: keep the bid that is still at the best, cancel the ask
+    up = q.step(Obs(1, 0, 0, book, 0, 0.0, [(7, BUY, 10_000, 100), (8, SELL, 10_100, 100)], [], np.array([2.0])))
+    assert up == [Cancel(8)]
+    # long 100 with a cap of 150: no more bids; the stale ask at 10,200 is replaced
+    full = q.step(Obs(2, 0, 0, book, 100, 0.0, [(8, SELL, 10_200, 100)], [], np.array([0.0])))
+    assert full == [Cancel(8), LimitOrder(SELL, 10_100, 100)]
