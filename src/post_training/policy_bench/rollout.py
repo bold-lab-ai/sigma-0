@@ -24,11 +24,15 @@ from post_training.policy_bench.history import RowLog
 from post_training.policy_bench.trace import Trace
 
 
-def predict(signal, logs: list[RowLog]) -> np.ndarray:
-    """The signal's predicted returns (rows, horizons) in bps on the last rows of each log."""
+def predict(signal, logs: list[RowLog], micro: int = 4) -> np.ndarray:
+    """The signal's predicted returns (rows, horizons) in bps on the last rows of each log,
+    `micro` rows per forward (nano-sigma's return_features.py micro batch)."""
     P = signal.prefill
-    x = [signal.inputs(log.rows(P), log.l10(P + 1)) for log in logs]
-    return signal.predict(np.stack([t for t, _ in x]), np.stack([b for _, b in x]))
+    out = []
+    for lo in range(0, len(logs), micro):
+        x = [signal.inputs(log.rows(P), log.l10(P + 1)) for log in logs[lo:lo + micro]]
+        out.append(signal.predict(np.stack([t for t, _ in x]), np.stack([b for _, b in x])))
+    return np.concatenate(out)
 
 
 def rollout(policy, signal, market, episodes, every: int = 64) -> list[Trace]:
