@@ -17,7 +17,10 @@ A row moves one background message at a time:
 2. A background message is drawn whole and kept only if sampling.finish
    accepts it; otherwise the row's cache is cut back to the message start and
    it is drawn again from the cached first-token distribution. After
-   MAX_REJECTIONS draws every token is masked to sampling.legal_tokens.
+   `max_rejections` draws every token is masked to sampling.legal_tokens
+   (0: every draw is masked). `keep_invalid` instead keeps a rejected first
+   draw in the token stream and leaves the book unchanged, as nano-sigma's
+   LOB-Bench generation does; it is there to compare with, not to evaluate.
 3. The message changes the book; an execution that reaches an agent order is
    the agent's passive (maker) fill. The processed rows and L10 rows go to the
    row log, which the signal reads.
@@ -108,9 +111,10 @@ class SimMarket:
     def __init__(self, model, shard_root: str, add_dir: str, batch: int, history: int = 3968,
                  n_messages: int = 1024, latency: int = 1, inventory_cap: int = 1000,
                  dtype: torch.dtype = torch.bfloat16, max_rejections: int = MAX_REJECTIONS,
-                 full_keys: bool = False) -> None:
+                 full_keys: bool = False, keep_invalid: bool = False) -> None:
         self.shard_root, self.add_dir, self.batch = shard_root, add_dir, batch
         self.max_rejections = max_rejections
+        self.keep_invalid = keep_invalid       # nano-sigma's LOB-Bench rule, for comparison only
         self.history, self.n_messages, self.latency, self.cap = history, n_messages, latency, inventory_cap
         self.context = CONTEXT_MESSAGES - n_messages - AGENT_MARGIN
         self.sim = BatchKVSimulator(model, batch, CONTEXT_MESSAGES * MAX_TOKENS_PER_MESSAGE + 8192, dtype,
@@ -265,6 +269,12 @@ class SimMarket:
                 return
             r.gen["rejected_" + reason] += 1
             r.gen["first_rejected"] += int(r.attempt == 0)
+            if self.keep_invalid:                      # kept in the stream, the book unchanged
+                r.gen["kept_invalid"] += 1
+                r.inp, r.between = tok, True
+                r.k += 1
+                r.mids.append(mid_of(r.log.now[3:]))
+                return
             r.attempt += 1
             r.gen["fallback"] += int(r.attempt == self.max_rejections)
             r.rng = np.random.default_rng([r.ep.seed, r.k, r.attempt])
