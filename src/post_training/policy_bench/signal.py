@@ -4,9 +4,10 @@ The signal reads processed rows, one per LOBSTER message (an execution burst
 is one row per filled order), and the L10 row before each. Two columns of a
 processed row depend on more than the message itself (job 7836700, 100%):
 
-    col 4       price_rel = (price_abs - mid floored to a tick) // TICK, the
-                mid of the book before the row, clipped to +-price_rel_clip(file)
-                ticks. Two preprocessing runs made the files: regular-session
+    col 4       price_rel = (price_abs - mid floored to a tick) / TICK, the
+                mid of the book before the row, truncated toward zero (a
+                sub-penny price below the mid: -8399.95 -> -8399, job 7842392)
+                and clipped to +-price_rel_clip(file) ticks. Two preprocessing runs made the files: regular-session
                 files (`*_34200000_57600000_*`) clip at 999, the others at
                 999,999 (jobs 7837738, 7837813, 7837914)
     cols 10-13  for events 2, 3, 4: price_rel, size, t_s, t_ns of the first
@@ -81,7 +82,8 @@ def processed_row(oid: int, evt: int, d: int, price: int, size: int, dt_s: int, 
     """One 14-column processed row, given the 43-column L10 row of the book before it
     and the day's price_rel clip."""
     row = np.empty(14, np.int64)
-    rel = (price - mid_floor(int(l10_before[3]), int(l10_before[5]))) // TICK
+    off = price - mid_floor(int(l10_before[3]), int(l10_before[5]))
+    rel = off // TICK if off >= 0 else -(-off // TICK)
     row[:10] = (oid, evt, d, price, max(-clip, min(clip, rel)),
                 min(size, MAX_SIZE), dt_s, dt_ns, t_s, t_ns)
     row[10:] = reg.ref(oid) if evt in (2, 3, 4) else (NA_VAL,) * 4

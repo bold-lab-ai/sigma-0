@@ -23,14 +23,17 @@ def _row(oid, evt, price_rel, size, t_s, t_ns):
     return r
 
 
-def test_price_rel_is_relative_to_the_floored_mid():
+def test_price_rel_is_relative_to_the_floored_mid_and_truncated():
     reg = AddRegistry()
     # mid (10_100 + 10_000) / 2 = 10_050, floored to 10_000
     r = processed_row(7, 1, 1, 10_000, 50, 0, 1, 34_200, 5, _l10(10_100, 10_000), reg, WIDE)
     assert list(r[:10]) == [7, 1, 1, 10_000, 0, 50, 0, 1, 34_200, 5]
     assert list(r[10:]) == NA4
     assert processed_row(7, 1, 0, 10_300, 50, 0, 0, 0, 0, _l10(10_100, 10_000), reg, WIDE)[4] == 3
-    assert processed_row(7, 1, 1, 9_950, 50, 0, 0, 0, 0, _l10(10_100, 10_000), reg, WIDE)[4] == -1   # floor
+    assert processed_row(7, 1, 1, 9_950, 50, 0, 0, 0, 0, _l10(10_100, 10_000), reg, WIDE)[4] == 0    # toward zero
+    assert processed_row(7, 1, 0, 10_050, 50, 0, 0, 0, 0, _l10(10_100, 10_000), reg, WIDE)[4] == 0
+    # AKAM 2026-01-05 row 1720: (8_905 - 848_900) / 100 = -8399.95 is stored as -8399
+    assert processed_row(7, 1, 1, 8_905, 1, 0, 0, 0, 0, _l10(851_000, 846_900), reg, WIDE)[4] == -8399
 
 
 def test_refs_come_from_the_first_add_of_the_order():

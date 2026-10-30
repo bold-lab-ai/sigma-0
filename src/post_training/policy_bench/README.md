@@ -51,7 +51,7 @@ never filled ahead of an older order, which in real markets it sometimes is.
 | G1 | Real-day replay: queue slots equal `<stem>_queue.npy`, top 10 levels equal the L10 file, every snapshot equals the stored one | `run/post_training/policy_bench/check_book_codec.py` |
 | G2 | `encode_stream` equals `encode_window`; decode inverts encode up to clipping; real messages pass `rules.check`; a slot-driven book stays equal to the id-driven one | same script |
 | G3 | The vendored simulator reproduces `newtok_a_r1`'s test CE on its 939 test windows; our book gives byte-identical model inputs; the KV cache equals the full forward | `run/post_training/policy_bench/check_simulator.py` |
-| G4 | The vendored signal reproduces the board's Pearson@128 on the 70,183 January test decisions; processed rows rebuilt from our book equal the files | `run/post_training/policy_bench/check_signal.py` |
+| G4 | The vendored signal's head equals nano-sigma's own return_features.py head on the 70,183 January test decisions (Pearson@128 0.29676; the board's 0.2979 is a ridge readout, not the head); processed rows rebuilt from our book equal the files | `run/post_training/policy_bench/check_signal.py` |
 
 Unit tests: `tests/unit/test_policy_bench_*.py`.
 

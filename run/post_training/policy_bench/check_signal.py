@@ -5,7 +5,10 @@ A. Reference. The vendored model and returnft_lobert_pass1's head on the
    return bench's January test decisions (every 50,000 rows from the open of
    each test stock-day, off placeholder rows; 70,183 decisions), read from the
    bookfix shards the signal was trained and scored on. The fine-tuned head's
-   pooled Pearson at 128 messages must equal the board's 0.2979.
+   pooled Pearson at 128 messages must equal 0.2967572, what nano-sigma's own
+   tools/return_features.py head gives on the same decisions (job 7842392,
+   bit-identical predictions). The board's 0.2979 is a different number: a
+   ridge readout fitted on train-split features (tools/return_bench.py).
 B. Our rows. For --n_ours decisions on the simulator's data (v2_20261013 shards
    with the v3 full-book files), rebuild every processed row of the context
    from our book (price_rel with the day's clip and the reference columns via
@@ -176,7 +179,8 @@ def main():
     differ = {e["message"] for e in vm if n_sig.get((e["month"], e["message"])) != e["n_msgs"]}
     res = dict(torch=torch.__version__, horizons=sig.horizons, prefill=sig.prefill,
                days_differ_between_shards=sorted(differ),
-               reference=dict(head_pearson_128=0.2979, decisions=70183, source="nano-sigma board, return bench 128"))
+               reference=dict(head_pearson_128=0.2967572131273937, decisions=70183,
+                              source="nano-sigma tools/return_features.py head, job 7842392"))
     res["b"] = part_b(vm, a.sim_root, a.add_dir, sig.prefill, sig.horizons, a.n_ours, a.workers, differ)
     print("B", json.dumps(res["b"]["total"]), flush=True)
     for x in res["b"]["bad"]:
