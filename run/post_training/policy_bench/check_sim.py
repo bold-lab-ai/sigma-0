@@ -40,6 +40,7 @@ from post_training.policy_bench.book import AGENT, ASK, BID
 from post_training.policy_bench.episodes import return_bench_decisions
 from post_training.policy_bench.policies import NoTrade
 from post_training.policy_bench.rollout import rollout
+from post_training.policy_bench.sampling import MAX_REJECTIONS
 from post_training.policy_bench.signal import Signal
 from post_training.policy_bench.sim_market import SimMarket
 from post_training.policy_bench.simulator import load_newtok
@@ -62,7 +63,7 @@ def same(a, b):
 
 def g6b(model, a, ep, n_steps):
     """Two markets, one with an agent bid one tick under the best bid."""
-    mk = [SimMarket(model, a.shard_root, a.add_dir, 1, n_messages=n_steps) for _ in range(2)]
+    mk = [SimMarket(model, a.shard_root, a.add_dir, 1, n_messages=n_steps, max_rejections=a.max_rejections) for _ in range(2)]
     for m in mk:
         m.reset([ep])
         m.advance()                                   # k = 0, the same draw in both
@@ -114,16 +115,19 @@ def main():
     p.add_argument("--batch", type=int, default=48)
     p.add_argument("--repeat_episodes", type=int, default=8)
     p.add_argument("--repeat_messages", type=int, default=128)
+    p.add_argument("--max_rejections", type=int, default=MAX_REJECTIONS, help="0: every draw masked")
     a = p.parse_args()
 
     dev = torch.device("cuda")
     model = load_newtok(a.sim_ckpt, dev)
     sig = Signal(a.signal_ckpt, dev)
     eps = episodes(a.manifest, a.n_episodes)
-    res = dict(episodes=len(eps), n_messages=a.n_messages, batch=a.batch, torch=torch.__version__)
+    res = dict(episodes=len(eps), n_messages=a.n_messages, batch=a.batch, max_rejections=a.max_rejections,
+               torch=torch.__version__)
 
     # G6a
-    small = SimMarket(model, a.shard_root, a.add_dir, a.repeat_episodes, n_messages=a.repeat_messages)
+    small = SimMarket(model, a.shard_root, a.add_dir, a.repeat_episodes, n_messages=a.repeat_messages,
+                      max_rejections=a.max_rejections)
     t1 = rollout(NoTrade(), None, small, eps[:a.repeat_episodes])
     t2 = rollout(NoTrade(), None, small, eps[:a.repeat_episodes])
     res["g6a"] = dict(episodes=len(t1), messages=a.repeat_messages, identical=sum(same(x, y) for x, y in zip(t1, t2)))
@@ -137,7 +141,8 @@ def main():
     torch.cuda.empty_cache()
 
     # G7 and G8s
-    market = SimMarket(model, a.shard_root, a.add_dir, a.batch, n_messages=a.n_messages)
+    market = SimMarket(model, a.shard_root, a.add_dir, a.batch, n_messages=a.n_messages,
+                       max_rejections=a.max_rejections)
     t0 = time.time()
     traces = rollout(NoTrade(), sig, market, eps, every=64)
     secs = time.time() - t0
