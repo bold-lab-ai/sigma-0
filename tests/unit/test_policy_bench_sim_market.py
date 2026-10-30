@@ -52,7 +52,7 @@ class _Trader:
         if obs.k == 0:
             out = [LimitOrder(BUY, 9_900, 2), MarketOrder(BUY, 1)]
         elif obs.k == 2:
-            out = [Cancel(oid) for oid, _ in obs.open_orders]
+            out = [Cancel(oid) for oid, *_ in obs.open_orders]
         self.sent += len(out)
         return out
 
@@ -97,3 +97,18 @@ def test_background_execution_fills_the_agent_front_of_queue(tmp_path, model):
     assert r.position == -4 and 99 not in r.resting
     rows = r.log.rows(2)
     assert rows[:, 0].tolist() == [99, 10] and rows[:, 5].tolist() == [4, 1] and rows[:, 6:8].tolist() == [[0, 5], [0, 0]]
+
+
+def test_continuous_batching_gives_each_episode_its_own_result(tmp_path, model):
+    """Three episodes through two slots, with agent orders that shift each row's
+    schedule, equal the same episodes run one at a time."""
+    entry = write_day(tmp_path)
+    eps = [Episode(entry, start=2, seed=s) for s in (3, 4, 5)]
+    together = rollout(_Trader(), None, _market(tmp_path, model, batch=2), eps, every=2)
+    alone = [rollout(_Trader(), None, _market(tmp_path, model, batch=1), [ep], every=2)[0] for ep in eps]
+    for x, y in zip(together, alone):
+        assert x.seed == y.seed and x.decisions.tolist() == [0, 2, 4]
+        np.testing.assert_array_equal(x.mid, y.mid)
+        np.testing.assert_array_equal(x.fills, y.fills)
+        np.testing.assert_array_equal(x.l10_end, y.l10_end)
+        assert x.gen == y.gen

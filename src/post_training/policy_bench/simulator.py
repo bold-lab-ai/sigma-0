@@ -16,7 +16,11 @@ gate G3 (run/post_training/policy_bench/check_simulator.py).
 `BatchKVSimulator` holds B sequences of their own lengths. `prefill` feeds a
 chunk to one row; `step` feeds one token to every active row at that row's own
 position, which is how B episodes are decoded together. `KVSimulator` is the
-one-row case.
+one-row case. A step attends over the longest row's length, masked per row.
+A row's logits do not change with that length (bit-equal, job 7848159:
+fully masked key blocks add exactly zero). `full_keys` fixes the length at
+max_len for a kernel where that would not hold; it costs 45 ms per step at
+batch 48 against 30 to 41 ms (job 7848120).
 """
 
 from __future__ import annotations
@@ -46,10 +50,11 @@ class BatchKVSimulator:
     """B sequences, each with its own length. Rows are cut back one at a time."""
 
     def __init__(self, model: NanoSigmaNewTok, batch: int, max_len: int,
-                 dtype: torch.dtype = torch.bfloat16) -> None:
+                 dtype: torch.dtype = torch.bfloat16, full_keys: bool = False) -> None:
         if not model.use_book:
             raise ValueError("the bench simulator has a book branch")
         self.m, self.batch, self.max_len, self.dtype = model, batch, max_len, dtype
+        self.full_keys = full_keys
         self.dev = model.embed.weight.device
         self.blocks = [*model.msg_blocks, *model.book_blocks, *model.blocks]
         h, dh = model.n_heads, model.d // model.n_heads
@@ -102,7 +107,7 @@ class BatchKVSimulator:
                 raise ValueError(f"row {b} is full at max_len {self.max_len}")
         # an inactive row writes one slot past its end (or its last slot), which nothing reads
         pos = torch.tensor([min(n, self.max_len - 1) for n in self.n], device=self.dev)
-        hi = int(pos.max()) + 1
+        hi = self.max_len if self.full_keys else int(pos.max()) + 1
         rows = torch.arange(self.batch, device=self.dev)
         cos, sin = self.cos[pos][:, None, None], self.sin[pos][:, None, None]     # (B, 1, 1, dh / 2)
         mask = (torch.arange(hi, device=self.dev)[None] <= pos[:, None])[:, None, None]

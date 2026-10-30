@@ -24,8 +24,8 @@ encodes its own input from that state.
 | `history.py` | `RowLog`, the processed rows and L10 rows both models read, and `start_state`, an episode's book and log rebuilt from a real day. |
 | `market.py` | `ReplayMarket`: real rows, virtual agent orders, market orders only, fill model `MidFill` or `BookFill`, latency and inventory cap. |
 | `sampling.py` | How a background message is drawn: the message grammar with the absolute time forced to t_prev + dt, `finish` (decodes, canonical, before the close, `rules.check`, both sides left non-empty) and `legal_tokens`, the per-token masks used after 32 rejections. |
-| `sim_market.py` | `SimMarket`: B episodes decoded in lockstep with `BatchKVSimulator`. Agent orders are fed to the simulator as forced messages; background messages are drawn whole and rejected until legal; executions fill agent orders front of queue first. |
-| `rollout.py` | `rollout(policy, signal, market, episodes, every)` -> one `Trace` per episode. Runs `market.batch` episodes at once, one policy copy each, the signal batched over them. |
+| `sim_market.py` | `SimMarket`: B slots decoded together with `BatchKVSimulator`, each row on its own (a row stops only at its decisions and its end). Agent orders are fed to the simulator as forced messages; background messages are drawn whole and rejected until legal; executions fill agent orders front of queue first. |
+| `rollout.py` | `rollout(policy, signal, market, episodes, every)` -> one `Trace` per episode. Keeps `market.batch` slots busy (a slot takes the next episode when its own ends), one policy copy per episode, the signal one row per forward. |
 | `trace.py` | `Trace` (mids, end book, fills, decisions, signal) and `save` / `load` as one npz. |
 | `costs.py`, `terminal.py`, `score.py` | `MakerTaker` fees; `MarkToMid`, `MarkToMicro`, `FlattenTaker`; `score(traces, terminal, cost)`, a pure function of the traces. |
 | `episodes.py` | Episode sets. `return_bench_decisions` is nano-sigma's test decision set. |
@@ -67,6 +67,10 @@ never filled ahead of an older order, which in real markets it sometimes is.
 | G3 | The vendored simulator reproduces `newtok_a_r1`'s test CE on its 939 test windows; our book gives byte-identical model inputs; the KV cache equals the full forward | `run/post_training/policy_bench/check_simulator.py` |
 | G4 | The vendored signal's head equals nano-sigma's own return_features.py head on the 70,183 January test decisions (Pearson@128 0.29676; the board's 0.2979 is a ridge readout, not the head); processed rows rebuilt from our book equal the files | `run/post_training/policy_bench/check_signal.py` |
 | G5 | `ReplayMarket` + `SignRule` (one share, latency 0, 128 rows, `MarkToMid`, no fees) against the PnL bench formula on the head (reference A 0.627753, B -1.863064; the board's 0.612 / -1.879 are the ridge readout). The bench's A and B must equal the formula on its own signs; signs that differ from nano-sigma's are counted | `run/post_training/policy_bench/check_replay.py` |
+
+| G6 | `SimMarket` under a fixed seed is reproducible; one agent order adds exactly that message (job 7846639: 8 of 8 identical; the agent message is the only difference) | `run/post_training/policy_bench/check_sim.py` |
+| G7 | Rejection rate of first draws, reasons, fallbacks to masks (job 7846639: 20.9% of first draws, 0.32% fallbacks; Kang's LOB-Bench board: 11.3% invalid, a measure not yet matched) | same script |
+| G8 | The signal on generated flow (job 7846639: head Pearson 0.320 at 64, 0.222 at 128, vs 0.343 and 0.297 on real data); next, the sign rule in sim vs replay | same script |
 
 Unit tests: `tests/unit/test_policy_bench_*.py`.
 

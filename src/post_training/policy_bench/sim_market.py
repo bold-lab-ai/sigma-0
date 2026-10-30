@@ -5,7 +5,7 @@ real rows the signal reads, and the simulator's context, the last
 CONTEXT_MESSAGES - n_messages - AGENT_MARGIN real messages, so that the whole
 episode stays within newtok_a_r1's longest training window (4,096 messages).
 
-`advance()` moves every row by one background message:
+A row moves one background message at a time:
 
 1. Agent orders that are due become messages and are fed as forced tokens, so
    the simulator sees them. A limit order rests at the back of its queue
@@ -22,9 +22,18 @@ episode stays within newtok_a_r1's longest training window (4,096 messages).
    the agent's passive (maker) fill. The processed rows and L10 rows go to the
    row log, which the signal reads.
 
-Rows that finish their message wait for the others (lockstep). Random numbers
-come from (episode seed, message index, attempt), so two policies on the same
-episode see the same background draws until their orders differ.
+Rows run on their own: the batch steps every row that is inside a message,
+and a row stops only where its caller asked. `run(every)` stops a row at its
+next decision (k a multiple of `every`, not yet decided) or at its end, and
+returns as soon as one row has stopped, so the rollout can decide for it,
+or `load` the next episode into a finished slot, while the others go on.
+`advance()` is the lockstep form (every row one message) that the checks use.
+Random numbers come from (episode seed, message index, attempt), and a row's
+numbers do not depend on the other rows (job 7848159: a row's logits are
+bit-equal whatever the other rows' lengths, on GH200 with torch 2.11; set
+`full_keys` if another kernel breaks that), so two policies on the same
+episode see the same background draws until their orders differ, whatever
+else is in the batch.
 """
 
 from __future__ import annotations
@@ -86,7 +95,9 @@ class _Row:
     rng: np.random.Generator | None = None
     logits0: np.ndarray | None = None
     n_start: int = 0
-    bg_done: bool = True
+    between: bool = True                              # no message in progress
+    decided: int = -1                                 # k of the last decision
+    target: int = 0                                   # advance(): stop at this k
     next_bg: int = BG_OID0
     next_agent: int = AGENT_OID0
 
@@ -96,42 +107,59 @@ class SimMarket:
 
     def __init__(self, model, shard_root: str, add_dir: str, batch: int, history: int = 3968,
                  n_messages: int = 1024, latency: int = 1, inventory_cap: int = 1000,
-                 dtype: torch.dtype = torch.bfloat16, max_rejections: int = MAX_REJECTIONS) -> None:
+                 dtype: torch.dtype = torch.bfloat16, max_rejections: int = MAX_REJECTIONS,
+                 full_keys: bool = False) -> None:
         self.shard_root, self.add_dir, self.batch = shard_root, add_dir, batch
         self.max_rejections = max_rejections
         self.history, self.n_messages, self.latency, self.cap = history, n_messages, latency, inventory_cap
         self.context = CONTEXT_MESSAGES - n_messages - AGENT_MARGIN
-        self.sim = BatchKVSimulator(model, batch, CONTEXT_MESSAGES * MAX_TOKENS_PER_MESSAGE + 8192, dtype)
+        self.sim = BatchKVSimulator(model, batch, CONTEXT_MESSAGES * MAX_TOKENS_PER_MESSAGE + 8192, dtype,
+                                    full_keys)
         self.dev = model.embed.weight.device
-        self.rows: list[_Row] = []
+        self.rows: list[_Row | None] = [None] * batch
+        self._pad: np.ndarray | None = None
 
-    # ------------------------------------------------------------ episode
+    # ------------------------------------------------------------ episodes
+    def load(self, i: int, ep) -> None:
+        """Start episode `ep` in slot i."""
+        self.sim.truncate(i, 0)
+        day, index = open_day(self.shard_root, self.add_dir, ep.entry)
+        book, log, reg, writer, slots = start_state(day, index, ep.start, self.history,
+                                                    8 * self.n_messages + 4 * AGENT_MARGIN)
+        r = _Row(ep, book, log, reg, writer, price_rel_clip(ep.entry["message"]),
+                 file_end_ns(ep.entry["message"]))
+        rows, l10 = log.rows(self.history), log.l10(self.history + 1)
+        bounds = burst_bounds(rows)
+        r0 = bounds[max(0, len(bounds) - self.context)][0]
+        tok, mot, first = encode_stream(rows[r0:], l10[r0:-1], slots[r0:])
+        bvec = book_features(l10[r0:-1][first])[mot]
+        inp = np.concatenate([[START], tok[:-1]])
+        self.sim.prefill(i, torch.as_tensor(inp, device=self.dev), torch.as_tensor(bvec, device=self.dev))
+        r.inp, r.bvec = int(tok[-1]), self._bvec(r)
+        r.mids.append(mid_of(log.now[3:]))
+        r.gen["context_tokens"] = len(tok)
+        self.rows[i] = r
+        if self._pad is None:
+            self._pad = np.zeros_like(r.bvec)
+
+    def unload(self, i: int) -> None:
+        self.rows[i] = None
+        self.sim.truncate(i, 0)
+
     def reset(self, eps: list) -> None:
+        """Slots 0 .. len(eps) - 1 start these episodes; the others are emptied."""
         if not 0 < len(eps) <= self.batch:
             raise ValueError(f"{len(eps)} episodes for a batch of {self.batch}")
-        self.rows = []
         for i in range(self.batch):
-            self.sim.truncate(i, 0)
+            self.unload(i)
         for i, ep in enumerate(eps):
-            day, index = open_day(self.shard_root, self.add_dir, ep.entry)
-            book, log, reg, writer, slots = start_state(day, index, ep.start, self.history,
-                                                        8 * self.n_messages + 4 * AGENT_MARGIN)
-            r = _Row(ep, book, log, reg, writer, price_rel_clip(ep.entry["message"]),
-                     file_end_ns(ep.entry["message"]))
-            rows, l10 = log.rows(self.history), log.l10(self.history + 1)
-            bounds = burst_bounds(rows)
-            r0 = bounds[max(0, len(bounds) - self.context)][0]
-            tok, mot, first = encode_stream(rows[r0:], l10[r0:-1], slots[r0:])
-            bvec = book_features(l10[r0:-1][first])[mot]
-            inp = np.concatenate([[START], tok[:-1]])
-            self.sim.prefill(i, torch.as_tensor(inp, device=self.dev), torch.as_tensor(bvec, device=self.dev))
-            r.inp, r.bvec = int(tok[-1]), self._bvec(r)
-            r.mids.append(mid_of(log.now[3:]))
-            r.gen["context_tokens"] = len(tok)
-            self.rows.append(r)
+            self.load(i, ep)
+
+    def finished(self, i: int) -> bool:
+        return self.rows[i].k >= self.n_messages
 
     def done(self) -> bool:
-        return all(r.k >= self.n_messages for r in self.rows)
+        return all(r is None or r.k >= self.n_messages for r in self.rows)
 
     def log(self, i: int):
         return self.rows[i].log
@@ -140,12 +168,18 @@ class SimMarket:
         r = self.rows[i]
         t = r.log.rows(1)[0]
         obs = Obs(r.k, int(t[8]), int(t[9]), r.log.now[3:].copy(), r.position, r.cash,
-                  [(oid, side) for oid, side in r.resting.items()], r.new)
+                  [(oid, side, *r.book.location(oid)[1:], self._remaining(r, oid)) for oid, side in r.resting.items()],
+                  r.new)
         r.new = []
         return obs
 
+    def _remaining(self, r: _Row, oid: int) -> int:
+        side, price = r.book.location(oid)
+        return r.book.queue(side, price)[r.book.slot_of(oid)].size
+
     def record_decision(self, i: int, signal) -> None:
         r = self.rows[i]
+        r.decided = r.k
         r.decisions.append(r.k)
         if signal is not None:
             r.signals.append(np.asarray(signal, np.float64))
@@ -162,30 +196,41 @@ class SimMarket:
         return Trace.build(r.ep, r.mids, r.log.now[3:], r.fills, r.decisions, r.signals, r.refused,
                            {k: int(v) for k, v in r.gen.items()})
 
-    # ------------------------------------------------------------ one background message per row
-    @torch.no_grad()
+    # ------------------------------------------------------------ decoding
+    def run(self, every: int) -> list[int]:
+        """Step the rows until at least one waits for a decision or has ended; those slots."""
+        def stop(r):
+            return r.k >= self.n_messages or (r.k % every == 0 and r.decided != r.k)
+        self._run(stop, wait_all=False)
+        return [i for i, r in enumerate(self.rows) if r is not None and r.between and stop(r)]
+
     def advance(self) -> None:
+        """Every row one background message on (lockstep)."""
         for r in self.rows:
-            if r.k >= self.n_messages:
-                r.bg_done = True
-                continue
-            self._activate(r)
-            r.bg_done = False
-            self._next_message(r)
+            if r is not None:
+                r.target = min(r.k + 1, self.n_messages)
+        self._run(lambda r: r.k >= r.target, wait_all=True)
+
+    @torch.no_grad()
+    def _run(self, stop, wait_all: bool) -> None:
+        """Step every row inside a message. A row between messages starts its next one
+        unless stop(row); return once one (or, with wait_all, every) row has stopped."""
         while True:
-            active = [not r.bg_done for r in self.rows] + [False] * (self.batch - len(self.rows))
-            if not any(active):
-                break
-            tok = torch.tensor([r.inp for r in self.rows] + [START] * (self.batch - len(self.rows)), device=self.dev)
-            bv = np.stack([r.bvec for r in self.rows] + [self.rows[0].bvec] * (self.batch - len(self.rows)))
+            for r in self.rows:
+                if r is not None and r.between and not stop(r):
+                    self._activate(r)
+                    r.between = False
+                    self._next_message(r)
+            live = [r.between for r in self.rows if r is not None]
+            if not live or (all(live) if wait_all else any(live)):
+                return
+            active = [r is not None and not r.between for r in self.rows]
+            tok = torch.tensor([START if r is None else r.inp for r in self.rows], device=self.dev)
+            bv = np.stack([self._pad if r is None else r.bvec for r in self.rows])
             logits = self.sim.step(tok, torch.as_tensor(bv, device=self.dev), active).double().cpu().numpy()
             for i, r in enumerate(self.rows):
                 if active[i]:
                     self._on_logits(i, r, logits[i])
-        for r in self.rows:
-            if r.k < self.n_messages:
-                r.k += 1
-                r.mids.append(mid_of(r.log.now[3:]))
 
     def _next_message(self, r: _Row) -> None:
         """Start the next message of a row: a waiting agent message, else a background draw."""
@@ -214,7 +259,9 @@ class SimMarket:
             m, reason = finish(st, r.book, self._mid(r), r.end)
             if m is not None:
                 self._apply_background(r, m)
-                r.inp, r.bvec, r.bg_done = tok, self._bvec(r), True
+                r.inp, r.bvec, r.between = tok, self._bvec(r), True
+                r.k += 1
+                r.mids.append(mid_of(r.log.now[3:]))
                 return
             r.gen["rejected_" + reason] += 1
             r.gen["first_rejected"] += int(r.attempt == 0)

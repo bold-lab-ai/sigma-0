@@ -71,7 +71,12 @@ class ReplayMarket:
     def reset(self, eps: list[Episode]) -> None:
         if len(eps) != 1:
             raise ValueError(f"ReplayMarket runs one episode at a time, got {len(eps)}")
-        ep = eps[0]
+        self.load(0, eps[0])
+
+    def unload(self, i: int = 0) -> None:
+        pass                                   # the day stays open for the next episode
+
+    def load(self, i: int, ep: Episode) -> None:
         last = getattr(self, "ep", None)
         if last is not None and last.entry["message"] == ep.entry["message"] \
                 and last.start + self.k <= ep.start - self.history:
@@ -93,6 +98,7 @@ class ReplayMarket:
         self._mid = [mid_of(self.rowlog.now[3:])]
         self._decisions: list[int] = []
         self._signals: list[np.ndarray] = []
+        self._decided = -1
 
     def log(self, i: int = 0):
         return self.rowlog
@@ -105,6 +111,7 @@ class ReplayMarket:
         return obs
 
     def record_decision(self, i: int, signal: np.ndarray | None) -> None:
+        self._decided = self.k
         self._decisions.append(self.k)
         if signal is not None:
             self._signals.append(np.asarray(signal, np.float64))
@@ -130,6 +137,15 @@ class ReplayMarket:
 
     def done(self) -> bool:
         return self.k >= self.n_messages
+
+    def finished(self, i: int = 0) -> bool:
+        return self.done()
+
+    def run(self, every: int) -> list[int]:
+        """Advance to the next decision (k a multiple of `every`, not yet decided) or the end."""
+        while not (self.done() or (self.k % every == 0 and self._decided != self.k)):
+            self.advance()
+        return [0]
 
     def trace(self, i: int = 0) -> Trace:
         return Trace.build(self.ep, self._mid, self.rowlog.now[3:], self._fills, self._decisions,

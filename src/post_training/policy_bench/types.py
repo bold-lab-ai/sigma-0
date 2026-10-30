@@ -60,7 +60,7 @@ class Obs:
     l10: np.ndarray                  # (40,) book at k: ask_p, ask_q, bid_p, bid_q per level
     position: int                    # shares
     cash: float                      # LOBSTER units x shares
-    open_orders: list = field(default_factory=list)
+    open_orders: list = field(default_factory=list)  # (oid, side, price, remaining size)
     fills: list = field(default_factory=list)       # since the previous observation
     signal: np.ndarray | None = None                # predicted returns per horizon, bps
 
