@@ -61,7 +61,8 @@ def open_day(shard_root: str, add_dir: str, entry: dict) -> tuple[DayFiles, np.n
 def start_state(day: DayFiles, index: np.ndarray, start: int, history: int, capacity: int,
                 book: Book | None = None, at: int = 0):
     """Book, row log, add registry and L10 writer before row `start`, with the
-    `history` rows before it rebuilt from our book. Returns (book, log, reg, writer).
+    `history` rows before it rebuilt from our book. Returns (book, log, reg, writer,
+    slots), slots being each history row's queue slot (codec.encode_stream's input).
 
     Given `book`, the real book before row `at` of the same day (at <= start -
     history), it is replayed forward instead of rebuilt from a snapshot."""
@@ -82,10 +83,12 @@ def start_state(day: DayFiles, index: np.ndarray, start: int, history: int, capa
     l10 = np.zeros((history + 1, 43), np.int64)
     l10[0] = day.l10[s0]
     writer = L10Writer(l10[0])
-    for r, _ in day.replay(book, s0, start):
+    slots = np.zeros(history, np.int64)
+    for r, slot in day.replay(book, s0, start):
         k = r - s0
+        slots[k] = slot
         f = raw[k]
         rows[k] = processed_row(*(int(x) for x in f[MSG_COLS]), l10[k], reg, clip)
         reg.observe(rows[k])
         l10[k + 1] = writer.next_row(book, int(f[8]), int(f[9]))
-    return book, RowLog(rows, l10, capacity), reg, writer
+    return book, RowLog(rows, l10, capacity), reg, writer, slots

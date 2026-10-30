@@ -23,7 +23,9 @@ encodes its own input from that state.
 | `types.py` | Plain data: `MarketOrder`, `LimitOrder`, `Cancel`, `Fill`, `Obs`, `Episode`. |
 | `history.py` | `RowLog`, the processed rows and L10 rows both models read, and `start_state`, an episode's book and log rebuilt from a real day. |
 | `market.py` | `ReplayMarket`: real rows, virtual agent orders, market orders only, fill model `MidFill` or `BookFill`, latency and inventory cap. |
-| `rollout.py` | `rollout(policy, signal, market, episodes, every)` -> one `Trace` per episode. |
+| `sampling.py` | How a background message is drawn: the message grammar with the absolute time forced to t_prev + dt, `finish` (decodes, canonical, before the close, `rules.check`, both sides left non-empty) and `legal_tokens`, the per-token masks used after 32 rejections. |
+| `sim_market.py` | `SimMarket`: B episodes decoded in lockstep with `BatchKVSimulator`. Agent orders are fed to the simulator as forced messages; background messages are drawn whole and rejected until legal; executions fill agent orders front of queue first. |
+| `rollout.py` | `rollout(policy, signal, market, episodes, every)` -> one `Trace` per episode. Runs `market.batch` episodes at once, one policy copy each, the signal batched over them. |
 | `trace.py` | `Trace` (mids, end book, fills, decisions, signal) and `save` / `load` as one npz. |
 | `costs.py`, `terminal.py`, `score.py` | `MakerTaker` fees; `MarkToMid`, `MarkToMicro`, `FlattenTaker`; `score(traces, terminal, cost)`, a pure function of the traces. |
 | `episodes.py` | Episode sets. `return_bench_decisions` is nano-sigma's test decision set. |
@@ -39,6 +41,10 @@ encodes its own input from that state.
 - Executions walk one side from the best price, take inner levels whole, and
   are filled front of queue first. That is the only way an agent order is
   filled by background flow.
+- No message, background or agent, may leave a side of the book empty. dP is
+  counted from the mid, and with one side empty the mid is computed from the
+  placeholder price (about -5e9 or +5e9): no price could be written after it.
+- A message ends no later than the file's last time (16:00 or 16:05).
 
 ## Known approximation: strict FIFO
 
@@ -60,7 +66,7 @@ never filled ahead of an older order, which in real markets it sometimes is.
 | G2 | `encode_stream` equals `encode_window`; decode inverts encode up to clipping; real messages pass `rules.check`; a slot-driven book stays equal to the id-driven one | same script |
 | G3 | The vendored simulator reproduces `newtok_a_r1`'s test CE on its 939 test windows; our book gives byte-identical model inputs; the KV cache equals the full forward | `run/post_training/policy_bench/check_simulator.py` |
 | G4 | The vendored signal's head equals nano-sigma's own return_features.py head on the 70,183 January test decisions (Pearson@128 0.29676; the board's 0.2979 is a ridge readout, not the head); processed rows rebuilt from our book equal the files | `run/post_training/policy_bench/check_signal.py` |
-| G5 | `ReplayMarket` + `SignRule` (one share, latency 0, 128 rows, `MarkToMid`, no fees) reproduces the PnL bench with the head: `MidFill` A 0.627753, `BookFill` B -1.863064 bps per bet (the board's 0.612 / -1.879 are the ridge readout) | `run/post_training/policy_bench/check_replay.py` |
+| G5 | `ReplayMarket` + `SignRule` (one share, latency 0, 128 rows, `MarkToMid`, no fees) against the PnL bench formula on the head (reference A 0.627753, B -1.863064; the board's 0.612 / -1.879 are the ridge readout). The bench's A and B must equal the formula on its own signs; signs that differ from nano-sigma's are counted | `run/post_training/policy_bench/check_replay.py` |
 
 Unit tests: `tests/unit/test_policy_bench_*.py`.
 
@@ -86,6 +92,13 @@ differ by up to about 2.5 and 1% of argmaxes flip, while the CE agrees to
 1e-4. A rollout is reproducible only on the same code path and kernels.
 Batched decoding is another code path: in bf16 its logits differ from one-row
 decoding by up to 0.38, in float32 by 3e-5 (job 7845818).
+
+The signal is affected the same way. G5 (job 7846117) predicts one decision
+at a time, nano-sigma four: on the 70,159 decisions outside the 8 days whose
+shards differ, 107 signs differ from nano-sigma's, all at predictions of at
+most 0.025 bps, which moves PnL A from 0.62785 to 0.62926. Returns and the
+accounting are exact there: A equals the PnL bench formula on the bench's own
+signs to every digit, B to the last bit.
 
 ## Throughput
 

@@ -1,16 +1,22 @@
 """rollout(policy, signal, market, episodes, every) -> one Trace per episode.
 
-    for each episode:
-        market.reset(ep); policy.reset(ep)
+A market runs `market.batch` episodes at once (ReplayMarket one, SimMarket
+several); each gets its own copy of the policy.
+
+    for each wave of episodes:
+        market.reset(wave); each policy copy .reset(episode)
         until market.done():
-            every `every` background messages: observe, add the signal, let the
-            policy act, submit its orders (active after the market's latency)
-            advance one background message
+            every `every` background messages: observe every row, add the
+            signal (one batch over the rows), let each policy act, submit its
+            orders (active after the market's latency)
+            advance every row by one background message
 
 The open position is not closed here; score.py values it with a terminal rule.
 """
 
 from __future__ import annotations
+
+import copy
 
 import numpy as np
 
@@ -18,26 +24,32 @@ from post_training.policy_bench.history import RowLog
 from post_training.policy_bench.trace import Trace
 
 
-def predict(signal, log: RowLog) -> np.ndarray:
-    """The signal's predicted returns (bps, one per horizon) on the last rows of the log."""
+def predict(signal, logs: list[RowLog]) -> np.ndarray:
+    """The signal's predicted returns (rows, horizons) in bps on the last rows of each log."""
     P = signal.prefill
-    tok, book = signal.inputs(log.rows(P), log.l10(P + 1))
-    return signal.predict(tok[None], book[None])[0]
+    x = [signal.inputs(log.rows(P), log.l10(P + 1)) for log in logs]
+    return signal.predict(np.stack([t for t, _ in x]), np.stack([b for _, b in x]))
 
 
 def rollout(policy, signal, market, episodes, every: int = 64) -> list[Trace]:
-    out = []
-    for ep in episodes:
-        market.reset(ep)
-        policy.reset(ep)
+    out: list[Trace] = []
+    B = getattr(market, "batch", 1)
+    for w in range(0, len(episodes), B):
+        wave = list(episodes[w:w + B])
+        market.reset(wave)
+        policies = [copy.deepcopy(policy) for _ in wave]
+        for p, ep in zip(policies, wave):
+            p.reset(ep)
         k = 0
         while not market.done():
             if k % every == 0:
-                obs = market.observe()
-                obs.signal = None if signal is None else predict(signal, market.log)
-                market.record_decision(obs.signal)
-                market.submit(policy.step(obs))
+                obs = [market.observe(i) for i in range(len(wave))]
+                sig = None if signal is None else predict(signal, [market.log(i) for i in range(len(wave))])
+                for i, o in enumerate(obs):
+                    o.signal = None if sig is None else sig[i]
+                    market.record_decision(i, o.signal)
+                    market.submit(i, policies[i].step(o))
             market.advance()
             k += 1
-        out.append(market.trace())
+        out += [market.trace(i) for i in range(len(wave))]
     return out

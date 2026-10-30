@@ -59,14 +59,19 @@ class BookFill:
 
 
 class ReplayMarket:
+    """One episode at a time (batch 1); the row index of every method is 0."""
     supports = (MarketOrder,)
+    batch = 1
 
     def __init__(self, shard_root: str, add_dir: str, fill, history: int = 3968,
                  n_messages: int = 1024, latency: int = 1, inventory_cap: int = 1000) -> None:
         self.shard_root, self.add_dir, self.fill_model = shard_root, add_dir, fill
         self.history, self.n_messages, self.latency, self.cap = history, n_messages, latency, inventory_cap
 
-    def reset(self, ep: Episode) -> None:
+    def reset(self, eps: list[Episode]) -> None:
+        if len(eps) != 1:
+            raise ValueError(f"ReplayMarket runs one episode at a time, got {len(eps)}")
+        ep = eps[0]
         last = getattr(self, "ep", None)
         if last is not None and last.entry["message"] == ep.entry["message"] \
                 and last.start + self.k <= ep.start - self.history:
@@ -76,8 +81,8 @@ class ReplayMarket:
         if ep.start + self.n_messages > day.n_msgs:
             raise ValueError(f"{ep.entry['message']}: {ep.start} + {self.n_messages} rows past the day")
         self.ep, self.day, self.index = ep, day, index
-        self.book, self.log, self.reg, self.writer = start_state(day, index, ep.start, self.history,
-                                                                 self.n_messages, book, at)
+        self.book, self.rowlog, self.reg, self.writer, _ = start_state(day, index, ep.start, self.history,
+                                                                    self.n_messages, book, at)
         self.clip = price_rel_clip(ep.entry["message"])
         self._rows = day.replay(self.book, ep.start, ep.start + self.n_messages)
         self._raw = np.asarray(day.messages[ep.start:ep.start + self.n_messages])
@@ -85,23 +90,26 @@ class ReplayMarket:
         self._pending: list[tuple[int, MarketOrder]] = []
         self._fills: list[Fill] = []
         self._new: list[Fill] = []
-        self._mid = [mid_of(self.log.now[3:])]
+        self._mid = [mid_of(self.rowlog.now[3:])]
         self._decisions: list[int] = []
         self._signals: list[np.ndarray] = []
 
-    def observe(self) -> Obs:
-        t = self.log.rows(1)[0]
-        obs = Obs(self.k, int(t[8]), int(t[9]), self.log.now[3:].copy(), self.position, self.cash,
+    def log(self, i: int = 0):
+        return self.rowlog
+
+    def observe(self, i: int = 0) -> Obs:
+        t = self.rowlog.rows(1)[0]
+        obs = Obs(self.k, int(t[8]), int(t[9]), self.rowlog.now[3:].copy(), self.position, self.cash,
                   [], self._new)
         self._new = []
         return obs
 
-    def record_decision(self, signal: np.ndarray | None) -> None:
+    def record_decision(self, i: int, signal: np.ndarray | None) -> None:
         self._decisions.append(self.k)
         if signal is not None:
             self._signals.append(np.asarray(signal, np.float64))
 
-    def submit(self, orders) -> None:
+    def submit(self, i: int, orders) -> None:
         for o in orders:
             if not isinstance(o, self.supports):
                 raise NotImplementedError(f"ReplayMarket takes market orders only, got {type(o).__name__}")
@@ -113,18 +121,18 @@ class ReplayMarket:
         fills = self._activate()
         r, _ = next(self._rows)
         f = self._raw[r - self.ep.start]
-        row = processed_row(*(int(x) for x in f[MSG_COLS]), self.log.now, self.reg, self.clip)
+        row = processed_row(*(int(x) for x in f[MSG_COLS]), self.rowlog.now, self.reg, self.clip)
         self.reg.observe(row)
-        self.log.append(row, self.writer.next_row(self.book, int(f[8]), int(f[9])))
+        self.rowlog.append(row, self.writer.next_row(self.book, int(f[8]), int(f[9])))
         self.k += 1
-        self._mid.append(mid_of(self.log.now[3:]))
+        self._mid.append(mid_of(self.rowlog.now[3:]))
         return fills
 
     def done(self) -> bool:
         return self.k >= self.n_messages
 
-    def trace(self) -> Trace:
-        return Trace.build(self.ep, self._mid, self.log.now[3:], self._fills, self._decisions,
+    def trace(self, i: int = 0) -> Trace:
+        return Trace.build(self.ep, self._mid, self.rowlog.now[3:], self._fills, self._decisions,
                            self._signals, self.refused)
 
     def _activate(self) -> list[Fill]:

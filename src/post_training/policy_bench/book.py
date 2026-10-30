@@ -98,6 +98,10 @@ class Book:
     def has(self, oid: int) -> bool:
         return oid in self._loc
 
+    def location(self, oid: int) -> tuple[int, int] | None:
+        """(side, price) of a resting order, or None."""
+        return self._loc.get(oid)
+
     def slot_of(self, oid: int, side: int | None = None, price: int | None = None) -> int:
         """Queue position of an order, or SLOT_UNKNOWN. With side and price
         given, the order must rest exactly there."""

@@ -9,8 +9,10 @@ A newtok message is (positions):
 The absolute time is never sampled: once dt is known, positions 6-10 are forced
 to t_prev + dt (`MessageState.forced`). The sampler draws a whole message and
 `finish` accepts it if it decodes, is the canonical encoding of what it decodes
-to, ends no later than the file's last time and passes rules.check in the
-current book. A rejected message is drawn again; after 32 rejections
+to, ends no later than the file's last time, passes rules.check in the
+current book and leaves both sides of the book non-empty. (dP is counted from
+the mid, and a one-sided book has a placeholder price on the empty side: no
+message could be written after it.) A rejected message is drawn again; after 32 rejections
 `legal_tokens` masks every position to the tokens that can still end in a
 legal message, so the draw cannot fail.
 """
@@ -102,7 +104,23 @@ def finish(state: MessageState, book: Book, mid: int, end: int) -> tuple[Message
     if any(p <= 0 for p, _ in m.levels):
         return None, "price_not_positive"
     reason = rules.check(m, book)
+    if reason is None and empties_side(m, book):
+        reason = "empties_side"
     return (m, None) if reason is None else (None, reason)
+
+
+def side_volume(book: Book, side: int) -> int:
+    return sum(book.volume(side, p) for p in book.prices(side))
+
+
+def empties_side(m: Message, book: Book) -> bool:
+    """Would this legal message take the last share off its side of the book?"""
+    side = side_of_direction(m.d)
+    if m.evt == 3:
+        return len(book.prices(side)) == 1 and len(book.queue(side, m.levels[0][0])) == 1
+    if m.evt == 4:
+        return sum(q for _, q in m.levels) >= side_volume(book, side)
+    return False
 
 
 # ---------------------------------------------------------------- masking
@@ -142,7 +160,14 @@ def _size_ranges(evt: int, rem: int):
     return [(1, min(rem - 1, MAX_SIZE))] if rem >= 2 else []
 
 
+def _last_order(book: Book, side: int) -> bool:
+    ps = book.prices(side)
+    return len(ps) == 1 and len(book.queue(side, ps[0])) == 1
+
+
 def _bg_sizes(book: Book, side: int, price: int, evt: int):
+    if evt == 3 and _last_order(book, side):
+        return []
     out = []
     for o in book.queue(side, price):
         if o.owner == BG:
@@ -172,9 +197,16 @@ def _dp_ranges(evt: int, side: int, book: Book, mid: int, level: int):
     if evt in (2, 3):
         return [((p - mid) // TICK,) * 2 for p in _cancel_prices(book, side, evt, mid)]
     prices = book.prices(side)
-    if level < len(prices) and _on_grid(prices[level], mid):
+    if level < len(prices) and _on_grid(prices[level], mid) and _exec_max(book, side, level) >= 1:
         return [((prices[level] - mid) // TICK,) * 2]
     return []
+
+
+def _exec_max(book: Book, side: int, level: int) -> int:
+    """Most shares an execution may take at a level: never the whole side."""
+    prices = book.prices(side)
+    vol = book.volume(side, prices[level])
+    return min(vol - 1 if level == len(prices) - 1 else vol, MAX_SIZE)
 
 
 def _side_ok(evt: int, side: int, book: Book, mid: int) -> bool:
@@ -208,6 +240,7 @@ def _exec_may_continue(state: MessageState, book: Book, mid: int, side: int, k: 
     """Level k of an execution was taken whole and level k + 1 exists."""
     _, price, size = _level(state, mid, k)
     return size == min(book.volume(side, price), MAX_SIZE) and bool(_dp_ranges(4, side, book, mid, k + 1))
+
 
 
 def legal_tokens(state: MessageState, book: Book, mid: int, end: int) -> np.ndarray:
@@ -248,13 +281,14 @@ def legal_tokens(state: MessageState, book: Book, mid: int, end: int) -> np.ndar
         elif evt in (2, 3):
             sizes = _bg_sizes(book, side, price, evt)
         else:
-            sizes = [(1, min(book.volume(side, price), MAX_SIZE))]
+            sizes = [(1, _exec_max(book, side, k))]
         if kind == "size1":
             return SIZE0 + _values(_lead(sizes, 100))
         return SIZE0 + _values(_tail(sizes, 100, cur[3] - SIZE0))
     if kind == "qslot":
         _, price, size = _level(state, mid, 0)
         q = book.queue(side, price)
-        ok = [s for s in range(len(q)) if q[s].owner == BG and rules._size_ok(evt, size, q[s].size)]
+        ok = [s for s in range(len(q)) if q[s].owner == BG and rules._size_ok(evt, size, q[s].size)
+              and not (evt == 3 and _last_order(book, side))]
         return QSLOT0 + np.array(sorted({min(s, LAST_SLOT) for s in ok}), np.int64)
     raise ValueError(f"no token follows a finished message ({kind})")

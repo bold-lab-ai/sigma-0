@@ -8,7 +8,8 @@ list of traces in one npz file, no pickle.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -27,9 +28,10 @@ class Trace:
     decisions: np.ndarray     # (n_decisions,) k of each decision
     signal: np.ndarray        # (n_decisions, H) predicted returns, bps (empty if no signal)
     refused: int              # orders refused by the inventory cap or an empty side
+    gen: dict = field(default_factory=dict)   # generation counts of a simulated episode
 
     @classmethod
-    def build(cls, ep, mids, l10_end, fills, decisions, signals, refused) -> "Trace":
+    def build(cls, ep, mids, l10_end, fills, decisions, signals, refused, gen=None) -> "Trace":
         return cls(
             message=ep.entry["message"], date=ep.entry.get("date", ""), start=int(ep.start), seed=int(ep.seed),
             mid=np.array([np.nan if m is None else m for m in mids], np.float64),
@@ -37,7 +39,7 @@ class Trace:
             fills=np.array([[f.k, f.side, f.price, f.size, f.maker, f.mid] for f in fills], np.float64).reshape(-1, 6),
             decisions=np.asarray(decisions, np.int64),
             signal=np.array(signals, np.float64).reshape(len(signals), -1) if signals else np.zeros((0, 0)),
-            refused=int(refused))
+            refused=int(refused), gen=dict(gen or {}))
 
     def position(self) -> int:
         return int((self.fills[:, 1] * self.fills[:, 3]).sum())
@@ -64,14 +66,17 @@ def save(path: str, traces: list[Trace]) -> None:
              decisions=np.concatenate([t.decisions for t in traces]) if traces else np.zeros(0, np.int64),
              signal=np.concatenate([t.signal.reshape(-1, H) if t.signal.size else np.zeros((len(t.decisions), H))
                                     for t in traces]) if traces else np.zeros((0, H)),
-             dec_ptr=ptr([t.decisions for t in traces]))
+             dec_ptr=ptr([t.decisions for t in traces]),
+             gen=np.array([json.dumps(t.gen, sort_keys=True) for t in traces]))
 
 
 def load(path: str) -> list[Trace]:
-    z = np.load(path)
+    with np.load(path) as f:          # NpzFile reads a member again on every access: read each once
+        z = {k: f[k] for k in f.files}
     mp, fp, dp = z["mid_ptr"], z["fills_ptr"], z["dec_ptr"]
     return [Trace(message=str(z["message"][i]), date=str(z["date"][i]), start=int(z["start"][i]),
                   seed=int(z["seed"][i]), mid=z["mid"][mp[i]:mp[i + 1]], l10_end=z["l10_end"][i],
                   fills=z["fills"][fp[i]:fp[i + 1]], decisions=z["decisions"][dp[i]:dp[i + 1]],
-                  signal=z["signal"][dp[i]:dp[i + 1]], refused=int(z["refused"][i]))
+                  signal=z["signal"][dp[i]:dp[i + 1]], refused=int(z["refused"][i]),
+                  gen=json.loads(str(z["gen"][i])) if "gen" in z else {})
             for i in range(len(z["start"]))]

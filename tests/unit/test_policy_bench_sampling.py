@@ -6,7 +6,7 @@ from post_training.policy_bench import rules
 from post_training.policy_bench.book import AGENT, ASK, BID, Book
 from post_training.policy_bench.codec import NS, Message, encode, mid_floor
 from post_training.policy_bench.nanosigma.data import SIGN0, TIME0
-from post_training.policy_bench.sampling import MessageState, file_end_ns, finish, legal_tokens
+from post_training.policy_bench.sampling import MessageState, empties_side, file_end_ns, finish, legal_tokens
 
 T0 = 36_000 * NS + 123_456_789
 END = 57_600 * NS
@@ -109,3 +109,24 @@ def test_finish_rejects_what_the_rules_reject():
 def test_file_end():
     assert file_end_ns("AAPL/AAPL_2026-01-05_34200000_57600000_message_10_proc.npy") == 57_600 * NS
     assert file_end_ns("ABT/ABT_2026-01-13_24900000_57900000_message_10_proc.npy") == 57_900 * NS
+
+
+def test_no_message_may_empty_a_side():
+    bk = Book()
+    bk.add(ASK, 10_100, 1, 5)
+    bk.add(BID, 10_000, 2, 5)
+    bk.add(BID, 9_900, 3, 2)
+    t = T0 + 1
+    take_ask = Message(4, 0, 0, 1, t // NS, t % NS, ((10_100, 5),))
+    take_bids = Message(4, 1, 0, 1, t // NS, t % NS, ((10_000, 5), (9_900, 1)))
+    delete_ask = Message(3, 0, 0, 1, t // NS, t % NS, ((10_100, 5),), qslot=0)
+    assert empties_side(take_ask, bk) and empties_side(delete_ask, bk) and not empties_side(take_bids, bk)
+    mid = mid_floor(10_100, 10_000)
+    st = MessageState(T0)
+    for tok in encode(take_ask, mid):
+        st.push(tok)
+    assert finish(st, bk, mid, END)[1] == "empties_side"
+    rng = np.random.default_rng(3)
+    for _ in range(200):                           # the masks never offer it either
+        m, reason = finish(_sample(bk, rng)[0], bk, mid, END)
+        assert reason is None and not (m.evt == 4 and m.d == 0 and m.levels[0][1] >= 5)

@@ -10,7 +10,6 @@ pytest.importorskip("torch")
 from post_training.policy_bench import trace as trace_io  # noqa: E402
 from post_training.policy_bench.book import ASK, BID, Book  # noqa: E402
 from post_training.policy_bench.costs import NO_COST, MakerTaker  # noqa: E402
-from post_training.policy_bench.daydata import build_add_index  # noqa: E402
 from post_training.policy_bench.market import BookFill, MidFill, ReplayMarket  # noqa: E402
 from post_training.policy_bench.policies import NoTrade, SignRule  # noqa: E402
 from post_training.policy_bench.rollout import rollout  # noqa: E402
@@ -18,6 +17,7 @@ from post_training.policy_bench.score import score  # noqa: E402
 from post_training.policy_bench.terminal import FlattenTaker, MarkToMicro, MarkToMid  # noqa: E402
 from post_training.policy_bench.trace import Trace  # noqa: E402
 from post_training.policy_bench.types import BUY, SELL, Episode, Fill, LimitOrder, MarketOrder  # noqa: E402
+from policy_bench_days import write_day  # noqa: E402
 
 
 def _book():
@@ -91,35 +91,6 @@ def test_traces_survive_save_and_load(tmp_path):
 
 
 # ---------------------------------------------------------------- a replayed day
-def _row(oid, evt, d, price, size, t=(34_200, 0)):
-    r = np.zeros(14, np.int64)
-    r[[0, 1, 2, 3, 5, 8, 9]] = oid, evt, d, price, size, *t
-    r[10:] = -9999
-    return r
-
-
-def _write_day(tmp_path):
-    """A six-row day. Snapshot 0 (before row 0): ask 10,100 x 5, bid 10,000 x 5."""
-    msgs = np.stack([_row(20, 1, 1, 9_900, 1), _row(21, 1, 0, 10_300, 1), _row(22, 1, 1, 9_800, 1),
-                     _row(10, 4, 0, 10_100, 2), _row(10, 4, 0, 10_100, 3), _row(23, 1, 0, 10_400, 1)])
-    month = tmp_path / "shard" / "2026-01"
-    month.mkdir(parents=True)
-    np.save(month / "X_message_10_proc.npy", msgs)
-    l10 = np.zeros((7, 43), np.int64)
-    l10[0, 3:] = _l10(10_100, 5, 10_000, 5)
-    np.save(month / "X_orderbook_10_proc.npy", l10)
-    fb = tmp_path / "fb"
-    fb.mkdir()
-    np.save(fb / "X_message_10_proc_queue.npy", np.zeros((6, 2), np.int32))
-    np.savez(fb / "X_message_10_proc_book_full.npz", snap_row=np.array([0]), grid=np.array(100), n_msgs=np.array(6),
-             lvl_ptr=np.array([0, 2]), lvl_side=np.array([ASK, BID], np.int8), lvl_price=np.array([10_100, 10_000]),
-             ord_ptr=np.array([0, 1, 2]), ord_size=np.array([5, 5]), ord_id=np.array([10, 11]))
-    (tmp_path / "adds" / "2026-01").mkdir(parents=True)
-    np.save(tmp_path / "adds" / "2026-01" / "X_message_10_proc_adds.npy", build_add_index(msgs))
-    return dict(month="2026-01", message="X_message_10_proc.npy", orderbook="X_orderbook_10_proc.npy",
-                fullbook_dir=str(fb), date="2026-01-05")
-
-
 class _Signal:
     """Stands in for signal.Signal: one horizon, always predicting `value` bps."""
     prefill, horizons = 2, [128]
@@ -140,7 +111,7 @@ def _market(tmp_path, fill, **kw):
 
 
 def test_replay_sign_rule_buys_at_the_ask_and_marks_to_mid(tmp_path):
-    entry = _write_day(tmp_path)
+    entry = write_day(tmp_path)
     sig = _Signal(+3.0)
     m = _market(tmp_path, BookFill(), n_messages=4, latency=0)
     [tr] = rollout(SignRule(0, size=2), sig, m, [Episode(entry, start=2)], every=64)
@@ -155,7 +126,7 @@ def test_replay_sign_rule_buys_at_the_ask_and_marks_to_mid(tmp_path):
 
 
 def test_replay_latency_and_inventory_cap(tmp_path):
-    entry = _write_day(tmp_path)
+    entry = write_day(tmp_path)
     m = _market(tmp_path, MidFill(), n_messages=4, latency=1, inventory_cap=1)
     [tr] = rollout(SignRule(0, size=1), _Signal(-1.0), m, [Episode(entry, start=2)], every=2)
     # decisions at k = 0 and 2; the sell fills one message later, at the mid after row 2
@@ -166,17 +137,17 @@ def test_replay_latency_and_inventory_cap(tmp_path):
 
 
 def test_replay_refuses_limit_orders_and_no_trade_is_flat(tmp_path):
-    entry = _write_day(tmp_path)
+    entry = write_day(tmp_path)
     m = _market(tmp_path, BookFill(), n_messages=4)
-    m.reset(Episode(entry, start=2))
+    m.reset([Episode(entry, start=2)])
     with pytest.raises(NotImplementedError):
-        m.submit([LimitOrder(BUY, 10_000, 1)])
+        m.submit(0, [LimitOrder(BUY, 10_000, 1)])
     [tr] = rollout(NoTrade(), None, m, [Episode(entry, start=2)])
     assert len(tr.fills) == 0 and score([tr], MarkToMid(), MakerTaker())["traded"] == 0
 
 
 def test_replay_reuses_the_days_book_with_the_same_result(tmp_path):
-    entry = _write_day(tmp_path)
+    entry = write_day(tmp_path)
     eps = [Episode(entry, start=1), Episode(entry, start=4)]
     def market():
         return ReplayMarket(str(tmp_path / "shard"), str(tmp_path / "adds"), MidFill(), history=1,
