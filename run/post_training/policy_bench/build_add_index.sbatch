@@ -29,8 +29,11 @@ WORKERS="${WORKERS:-32}"
 
 MNT="/tmp/policy_bench_adds_${SLURM_JOB_ID}"
 cleanup() {
-  for k in $(seq "$N_MOUNTS"); do fusermount -u "$MNT/$k/$MONTH" 2>/dev/null || fusermount3 -u "$MNT/$k/$MONTH" 2>/dev/null || true; done
-  rm -rf "$MNT"
+  for k in $(seq "$N_MOUNTS"); do
+    fusermount -u "$MNT/$k/$MONTH" 2>/dev/null || fusermount3 -u "$MNT/$k/$MONTH" 2>/dev/null || true
+    rmdir "$MNT/$k/$MONTH" "$MNT/$k" 2>/dev/null || true
+  done
+  rmdir "$MNT" 2>/dev/null || true    # never rm -r: a mount that failed to detach is the read-only shard
 }
 trap cleanup EXIT
 mount_shard() {   # <mount point>

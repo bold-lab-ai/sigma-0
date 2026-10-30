@@ -76,7 +76,7 @@ def _pearson(x, y):
     return float(np.corrcoef(x, y)[0, 1])
 
 
-def part_a(sig, entries, root, workers, micro=4, limit=0):
+def part_a(sig, entries, root, workers, micro=4, block=256, limit=0):
     ds = decisions(entries, sig.prefill, sig.horizons)
     if limit:
         ds = ds[:limit]
@@ -84,16 +84,15 @@ def part_a(sig, entries, root, workers, micro=4, limit=0):
     preds, rs, spreads = [], [], []
     t0 = time.time()
     with Pool(workers) as pool:
-        batch = []
-        for k, item in enumerate(pool.imap(_ref_item, ds, chunksize=4)):
-            batch.append(item)
-            if len(batch) == micro or k == len(ds) - 1:
+        for lo in range(0, len(ds), block):          # imap would queue every item ahead of the GPU
+            items = pool.map(_ref_item, ds[lo:lo + block], chunksize=1)
+            for k in range(0, len(items), micro):
+                batch = items[k:k + micro]
                 preds.append(sig.predict(np.stack([x[0] for x in batch]), np.stack([x[1] for x in batch])))
-                rs += [x[2] for x in batch]
-                spreads += [x[3] for x in batch]
-                batch = []
-            if k % 5000 == 0:
-                print(f"A {k}/{len(ds)} {time.time() - t0:.0f} s", flush=True)
+            rs += [x[2] for x in items]
+            spreads += [x[3] for x in items]
+            if lo % (20 * block) == 0:
+                print(f"A {lo}/{len(ds)} {time.time() - t0:.0f} s", flush=True)
     pred, r, spread = np.concatenate(preds), np.array(rs), np.array(spreads)
     out = dict(decisions=len(ds), seconds=time.time() - t0, horizons={})
     for j, h in enumerate(sig.horizons):
@@ -180,6 +179,9 @@ def main():
                reference=dict(head_pearson_128=0.2979, decisions=70183, source="nano-sigma board, return bench 128"))
     res["b"] = part_b(vm, a.sim_root, a.add_dir, sig.prefill, sig.horizons, a.n_ours, a.workers, differ)
     print("B", json.dumps(res["b"]["total"]), flush=True)
+    for x in res["b"]["bad"]:
+        print("B bad", json.dumps(x), flush=True)
+    json.dump(res, open(a.out, "w"), indent=1)
     if not a.skip_a:
         res["a"] = part_a(sig, sm, a.signal_root, a.workers, limit=a.limit_a)
         print("A", json.dumps(res["a"]), flush=True)
