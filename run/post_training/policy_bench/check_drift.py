@@ -13,7 +13,10 @@ Why: in the dev evaluation (jobs 7848223, 7848225) the half spread at the
 end of an episode had a median of 0.79 bps generated against 2.66 bps real.
 
     python run/post_training/policy_bench/check_drift.py --config configs/policy_bench/v1.yaml \
-        --shard_root <mount> --out <file.json> [--n_episodes 96] [--block 128]
+        --shard_root <mount> --out <file.json> [--n_episodes 96] [--block 128] [--max_rejections 0]
+
+--max_rejections 0 masks every draw to sampling.legal_tokens (no rejection):
+the event is still the model's choice, the fields are kept legal.
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ from post_training.policy_bench.daydata import DayFiles
 from post_training.policy_bench.episodes import load_episodes
 from post_training.policy_bench.policies import NoTrade
 from post_training.policy_bench.rollout import rollout
+from post_training.policy_bench.sampling import MAX_REJECTIONS
 from post_training.policy_bench.sim_market import SimMarket
 from post_training.policy_bench.simulator import load_newtok
 
@@ -98,6 +102,7 @@ def main():
     p.add_argument("--shard_root", required=True)
     p.add_argument("--n_episodes", type=int, default=96)
     p.add_argument("--block", type=int, default=128)
+    p.add_argument("--max_rejections", type=int, default=MAX_REJECTIONS)
     p.add_argument("--out", required=True)
     a = p.parse_args()
 
@@ -110,14 +115,14 @@ def main():
     dev = torch.device("cuda")
     market = _Recording(load_newtok(cfg["simulator"], dev), a.shard_root, cfg["add_dir"], cfg["batch"],
                         history=cfg["history"], n_messages=n, latency=cfg["latency"],
-                        inventory_cap=cfg["inventory_cap"])
+                        inventory_cap=cfg["inventory_cap"], max_rejections=a.max_rejections)
     t0 = time.time()
     rollout(NoTrade(), None, market, eps, every=n)
     sim = [market.stats[(ep.entry["message"], ep.start)] for ep in eps]
 
     end_real = np.array([st[-1][2] for st in real])
     end_sim = np.array([st[-1][2] for st in sim])
-    res = dict(config=a.config, episodes=len(eps), n_messages=n, block=a.block, seconds=time.time() - t0,
+    res = dict(config=a.config, max_rejections=a.max_rejections, episodes=len(eps), n_messages=n, block=a.block, seconds=time.time() - t0,
                torch=torch.__version__,
                start=pooled([st[:1] for st in real], 1, 1)[0],
                sim=pooled(sim, a.block, n), real=pooled(real, a.block, n),
