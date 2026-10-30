@@ -14,6 +14,12 @@ the same decisions (G4, job 7842392) the reference is A 0.627753 and B -1.863064
 bps per bet, hit rate 0.506946 (the board's 0.612 / -1.879 come from a ridge
 readout, not the head).
 
+With --reference_npz (the G4 probe's per-decision head predictions) the check
+splits in two: the bench's A and B must equal the PnL bench formula on our own
+signs exactly (the accounting, mids and fills), and the signs that differ from
+nano-sigma's are counted with their size (the signal runs at batch 1 here, at
+batch 4 there, so bf16 rounding can flip a prediction near zero).
+
     python run/post_training/policy_bench/check_replay.py --shard_root <v2_20261013 mnt> \
         --signal_manifest <v2>/test.json --sim_manifest <v3>/test.json --add_dir <add index> \
         --ckpt <returnft_lobert_pass1>/ckpt.pt --out <file.json> [--reference_npz <G4 probe preds>]
@@ -111,10 +117,22 @@ def main():
         mine = sig[:, j]
         r = z["r"][:len(eps), j]
         ours_r = np.array([(t.mid[-1] - t.mid[0]) / t.mid[0] * 1e4 for t in traces["mid"]])
+        sp = z["spread"][:len(eps)]
+        flip = np.sign(mine) != np.sign(ref)
+
+        def pnl_bench(bet):            # tools/return_bench.py pnl(), c_exch_bps 0
+            g = np.abs(bet).sum()
+            return float((bet * r).sum() / g), float((bet * r - np.abs(bet) * 0.5 * sp).sum() / g)
+
+        a_ours, b_ours = pnl_bench(np.sign(mine))
         out["per_decision"] = dict(
             pred_bit_equal=int((mine == ref).sum()), pred_max_abs_diff=float(np.abs(mine - ref).max()),
-            sign_differs=int((np.sign(mine) != np.sign(ref)).sum()),
-            return_max_abs_diff=float(np.nanmax(np.abs(ours_r - r))))
+            sign_differs=int(flip.sum()),
+            sign_differs_max_abs_pred=float(np.abs(np.r_[mine[flip], ref[flip]]).max()) if flip.any() else 0.0,
+            return_max_abs_diff=float(np.nanmax(np.abs(ours_r - r))),
+            pnl_bench_reference_signs=pnl_bench(np.sign(ref)), pnl_bench_our_signs=(a_ours, b_ours),
+            bench_equals_pnl_bench_on_our_signs=bool(out["a"]["bps_per_bet"] == a_ours
+                                                     and out["b"]["bps_per_bet"] == b_ours))
     base = os.path.splitext(a.out)[0]
     for name in traces:
         trace_io.save(f"{base}_{name}_traces.npz", traces[name])
