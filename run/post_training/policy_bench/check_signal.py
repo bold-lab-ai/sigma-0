@@ -36,23 +36,12 @@ import torch
 
 from post_training.policy_bench.book import L10Writer
 from post_training.policy_bench.daydata import DayFiles
+from post_training.policy_bench.episodes import return_bench_decisions as decisions
 from post_training.policy_bench.nanosigma.data import book_features, encode_messages
 from post_training.policy_bench.signal import AddRegistry, Signal, price_rel_clip, processed_row
 
-STRIDE = 50_000       # tools/return_features.py --test_stride
 ASK1, BID1 = 3, 5
 G = {}
-
-
-def decisions(entries, P, H):
-    span = P + 1 + max(H)
-    out = []
-    for e in entries:
-        bad = list(e.get("bad_rows", [])) + list(e.get("exclude", []))
-        for s in range(0, e["n_msgs"] - span + 1, STRIDE):
-            if not any(s < t and b < s + span for b, t in bad):
-                out.append((e, s))
-    return out
 
 
 def _valid(row):

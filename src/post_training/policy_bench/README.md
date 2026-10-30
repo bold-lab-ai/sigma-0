@@ -15,11 +15,19 @@ encodes its own input from that state.
 | Module | What it does |
 |---|---|
 | `book.py` | L3 book. FIFO queue per price, an owner (background or agent) on every order. Updated by order id for real data and by queue slot for generated messages. `L10Writer` gives the 43-column L10 row the models read. |
-| `daydata.py` | One stock-day of the v3 dataset and the replay that rebuilds its full book from the stored snapshots. |
+| `daydata.py` | One stock-day of the v3 dataset and the replay that rebuilds its full book from the stored snapshots. `build_add_index` gives each order id's first add, stored once per day by `run/post_training/policy_bench/build_add_index.py`. |
 | `codec.py` | The newtok `Message`: `encode` (identical to nano-sigma's `encode_window`) and a strict `decode`. |
-| `simulator.py` | The newtok model with a KV cache: feed positions in chunks or one at a time, cut back a rejected message. |
+| `simulator.py` | The newtok model with a KV cache. `BatchKVSimulator` holds several sequences of their own lengths: prefill one row, step every row by one token, cut back one row. `KVSimulator` is the one-row case. |
 | `signal.py` | The return signal: processed rows from our book (`price_rel`, the reference columns), and the fine-tuned head's prediction at a decision. |
 | `rules.py` | Legality of a background message in a book (what the sampler rejects), and how a legal message changes the book. |
+| `types.py` | Plain data: `MarketOrder`, `LimitOrder`, `Cancel`, `Fill`, `Obs`, `Episode`. |
+| `history.py` | `RowLog`, the processed rows and L10 rows both models read, and `start_state`, an episode's book and log rebuilt from a real day. |
+| `market.py` | `ReplayMarket`: real rows, virtual agent orders, market orders only, fill model `MidFill` or `BookFill`, latency and inventory cap. |
+| `rollout.py` | `rollout(policy, signal, market, episodes, every)` -> one `Trace` per episode. |
+| `trace.py` | `Trace` (mids, end book, fills, decisions, signal) and `save` / `load` as one npz. |
+| `costs.py`, `terminal.py`, `score.py` | `MakerTaker` fees; `MarkToMid`, `MarkToMicro`, `FlattenTaker`; `score(traces, terminal, cost)`, a pure function of the traces. |
+| `episodes.py` | Episode sets. `return_bench_decisions` is nano-sigma's test decision set. |
+| `policies/` | `NoTrade`, `SignRule`. |
 | `nanosigma/` | Vendored nano-sigma encoding code, byte for byte. See `nanosigma/PROVENANCE.md`. |
 
 ## Rules a background message obeys
@@ -52,6 +60,7 @@ never filled ahead of an older order, which in real markets it sometimes is.
 | G2 | `encode_stream` equals `encode_window`; decode inverts encode up to clipping; real messages pass `rules.check`; a slot-driven book stays equal to the id-driven one | same script |
 | G3 | The vendored simulator reproduces `newtok_a_r1`'s test CE on its 939 test windows; our book gives byte-identical model inputs; the KV cache equals the full forward | `run/post_training/policy_bench/check_simulator.py` |
 | G4 | The vendored signal's head equals nano-sigma's own return_features.py head on the 70,183 January test decisions (Pearson@128 0.29676; the board's 0.2979 is a ridge readout, not the head); processed rows rebuilt from our book equal the files | `run/post_training/policy_bench/check_signal.py` |
+| G5 | `ReplayMarket` + `SignRule` (one share, latency 0, 128 rows, `MarkToMid`, no fees) reproduces the PnL bench with the head: `MidFill` A 0.627753, `BookFill` B -1.863064 bps per bet (the board's 0.612 / -1.879 are the ridge readout) | `run/post_training/policy_bench/check_replay.py` |
 
 Unit tests: `tests/unit/test_policy_bench_*.py`.
 
@@ -75,3 +84,12 @@ In float32 the KV cache equals the full forward (max logit difference 3e-4,
 job 7835151). In bf16 the two use different attention kernels, so logits
 differ by up to about 2.5 and 1% of argmaxes flip, while the CE agrees to
 1e-4. A rollout is reproducible only on the same code path and kernels.
+Batched decoding is another code path: in bf16 its logits differ from one-row
+decoding by up to 0.38, in float32 by 3e-5 (job 7845818).
+
+## Throughput
+
+One decoding step at a 67,036-token context, bf16, one GH200 (job 7845818):
+29 ms at batch 1, 40 ms at batch 48 (1,198 tokens/s). The one-row KV cache
+without a mask takes 7.2 ms (G3). Batch 48 is 8.6x that; 200 episodes of 1,024
+messages (about 16 tokens each) take about 46 min.
