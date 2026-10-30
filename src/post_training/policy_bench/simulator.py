@@ -12,6 +12,11 @@ Inputs per position k, as in nano-sigma's training (train_newtok.shift):
 
 `KVSimulator.feed` on a whole window equals the model's forward on it; that is
 gate G3 (run/post_training/policy_bench/check_simulator.py).
+
+`BatchKVSimulator` holds B sequences of their own lengths. `prefill` feeds a
+chunk to one row; `step` feeds one token to every active row at that row's own
+position, which is how B episodes are decoded together. `KVSimulator` is the
+one-row case.
 """
 
 from __future__ import annotations
@@ -37,69 +42,135 @@ def load_newtok(path: str, device: torch.device | str = "cpu") -> NanoSigmaNewTo
     return m.to(device).eval()
 
 
+class BatchKVSimulator:
+    """B sequences, each with its own length. Rows are cut back one at a time."""
+
+    def __init__(self, model: NanoSigmaNewTok, batch: int, max_len: int,
+                 dtype: torch.dtype = torch.bfloat16) -> None:
+        if not model.use_book:
+            raise ValueError("the bench simulator has a book branch")
+        self.m, self.batch, self.max_len, self.dtype = model, batch, max_len, dtype
+        self.dev = model.embed.weight.device
+        self.blocks = [*model.msg_blocks, *model.book_blocks, *model.blocks]
+        h, dh = model.n_heads, model.d // model.n_heads
+        self.k = torch.zeros(len(self.blocks), batch, h, max_len, dh, device=self.dev, dtype=dtype)
+        self.v = torch.zeros_like(self.k)
+        self.cos, self.sin = rope_cache(max_len, dh, self.dev)
+        self.n = [0] * batch
+
+    def truncate(self, row: int, n: int) -> None:
+        if not 0 <= n <= self.n[row]:
+            raise ValueError(f"truncate row {row} to {n} with {self.n[row]} positions")
+        self.n[row] = n
+
+    @torch.no_grad()
+    def prefill(self, row: int, tokens: torch.Tensor, book: torch.Tensor) -> torch.Tensor:
+        """Append tokens (L,) with book (L, 503) to one row -> logits (L, vocab), float32."""
+        L, lo = tokens.shape[0], self.n[row]
+        if lo + L > self.max_len:
+            raise ValueError(f"{lo} + {L} positions exceed max_len {self.max_len}")
+        hi = lo + L
+        cos, sin = self.cos[lo:hi], self.sin[lo:hi]
+        r = slice(row, row + 1)
+
+        def attend(i, q, k, v):
+            q, k = apply_rope(q, cos, sin), apply_rope(k, cos, sin)
+            self.k[i, r, :, lo:hi] = k.to(self.dtype)
+            self.v[i, r, :, lo:hi] = v.to(self.dtype)
+            kk, vv = self.k[i, r, :, :hi].to(q.dtype), self.v[i, r, :, :hi].to(q.dtype)
+            if lo == 0:
+                return F.scaled_dot_product_attention(q, kk, vv, is_causal=True)
+            if L == 1:
+                return F.scaled_dot_product_attention(q, kk, vv)
+            # new position j sees the cache and new positions <= j
+            mask = torch.arange(hi, device=q.device)[None] <= torch.arange(lo, hi, device=q.device)[:, None]
+            return F.scaled_dot_product_attention(q, kk, vv, attn_mask=mask)
+
+        logits = self._forward(tokens[None], book[None], attend)
+        self.n[row] = hi
+        return logits[0]
+
+    @torch.no_grad()
+    def step(self, tokens: torch.Tensor, book: torch.Tensor, active: list[bool] | None = None) -> torch.Tensor:
+        """One token per row: tokens (B,), book (B, 503) -> logits (B, vocab), float32.
+        Inactive rows are computed but keep their length and cache."""
+        active = [True] * self.batch if active is None else list(active)
+        if len(tokens) != self.batch or len(active) != self.batch:
+            raise ValueError(f"step takes all {self.batch} rows")
+        for b in range(self.batch):
+            if active[b] and self.n[b] >= self.max_len:
+                raise ValueError(f"row {b} is full at max_len {self.max_len}")
+        # an inactive row writes one slot past its end (or its last slot), which nothing reads
+        pos = torch.tensor([min(n, self.max_len - 1) for n in self.n], device=self.dev)
+        hi = int(pos.max()) + 1
+        rows = torch.arange(self.batch, device=self.dev)
+        cos, sin = self.cos[pos][:, None, None], self.sin[pos][:, None, None]     # (B, 1, 1, dh / 2)
+        mask = (torch.arange(hi, device=self.dev)[None] <= pos[:, None])[:, None, None]
+
+        def attend(i, q, k, v):
+            q, k = _rope_rows(q, cos, sin), _rope_rows(k, cos, sin)
+            self.k[i, rows, :, pos] = k[:, :, 0].to(self.dtype)
+            self.v[i, rows, :, pos] = v[:, :, 0].to(self.dtype)
+            kk, vv = self.k[i, :, :, :hi].to(q.dtype), self.v[i, :, :, :hi].to(q.dtype)
+            return F.scaled_dot_product_attention(q, kk, vv, attn_mask=mask)
+
+        logits = self._forward(tokens[:, None], book[:, None], attend)
+        for b in range(self.batch):
+            self.n[b] += int(active[b])
+        return logits[:, 0]
+
+    def _forward(self, tokens, book, attend):
+        """The newtok forward (NanoSigmaNewTok.hidden + head) with attention by `attend`."""
+        m = self.m
+        with torch.autocast(tokens.device.type, dtype=self.dtype, enabled=self.dtype != torch.float32), \
+                sdpa_kernel(_KERNELS):
+            i = 0
+            x = m.embed(tokens)
+            for blk in m.msg_blocks:
+                x = _block(i, blk, x, attend); i += 1
+            b = book.to(x.dtype)
+            b = m.book_proj(b + m.book_pre(m.book_pre_norm(b)))
+            for blk in m.book_blocks:
+                b = _block(i, blk, b, attend); i += 1
+            x = m.fuse(torch.cat([x, b], dim=-1))
+            for blk in m.blocks:
+                x = _block(i, blk, x, attend); i += 1
+            return m.head(m.norm(x)).float()
+
+
 class KVSimulator:
     """One sequence. `feed` appends positions and returns their logits;
     `truncate` drops positions from the end."""
 
     def __init__(self, model: NanoSigmaNewTok, max_len: int, dtype: torch.dtype = torch.bfloat16) -> None:
-        if not model.use_book:
-            raise ValueError("the bench simulator has a book branch")
-        self.m, self.max_len, self.dtype = model, max_len, dtype
-        dev = model.embed.weight.device
-        self.blocks = [*model.msg_blocks, *model.book_blocks, *model.blocks]
-        h, dh = model.n_heads, model.d // model.n_heads
-        self.k = torch.zeros(len(self.blocks), 1, h, max_len, dh, device=dev, dtype=dtype)
-        self.v = torch.zeros_like(self.k)
-        self.cos, self.sin = rope_cache(max_len, dh, dev)
-        self.n = 0
+        self._b = BatchKVSimulator(model, 1, max_len, dtype)
+        self.max_len = max_len
+
+    @property
+    def n(self) -> int:
+        return self._b.n[0]
 
     def truncate(self, n: int) -> None:
-        if not 0 <= n <= self.n:
-            raise ValueError(f"truncate to {n} with {self.n} positions")
-        self.n = n
+        self._b.truncate(0, n)
 
-    @torch.no_grad()
     def feed(self, tokens: torch.Tensor, book: torch.Tensor) -> torch.Tensor:
         """tokens (L,) ids, book (L, 503) -> logits (L, vocab), float32."""
-        L = tokens.shape[0]
-        if self.n + L > self.max_len:
-            raise ValueError(f"{self.n} + {L} positions exceed max_len {self.max_len}")
-        m, lo = self.m, self.n
-        cos, sin = self.cos[lo:lo + L], self.sin[lo:lo + L]
-        with torch.autocast(tokens.device.type, dtype=self.dtype, enabled=self.dtype != torch.float32), \
-                sdpa_kernel(_KERNELS):
-            i = 0
-            x = m.embed(tokens[None])
-            for blk in m.msg_blocks:
-                x = self._block(i, blk, x, cos, sin); i += 1
-            b = book[None].to(x.dtype)
-            b = m.book_proj(b + m.book_pre(m.book_pre_norm(b)))
-            for blk in m.book_blocks:
-                b = self._block(i, blk, b, cos, sin); i += 1
-            x = m.fuse(torch.cat([x, b], dim=-1))
-            for blk in m.blocks:
-                x = self._block(i, blk, x, cos, sin); i += 1
-            logits = m.head(m.norm(x))
-        self.n = lo + L
-        return logits[0].float()
+        return self._b.prefill(0, tokens, book)
 
-    def _block(self, i, blk, x, cos, sin):
-        x = x + self._attn(i, blk.attn, blk.n1(x), cos, sin)
-        return x + blk.mlp(blk.n2(x))
 
-    def _attn(self, i, a, x, cos, sin):
-        B, L, D = x.shape
-        q, k, v = a.qkv(x).view(B, L, 3, a.h, a.dh).permute(2, 0, 3, 1, 4)
-        q, k = apply_rope(q, cos, sin), apply_rope(k, cos, sin)
-        lo, hi = self.n, self.n + L
-        self.k[i, :, :, lo:hi] = k.to(self.dtype)
-        self.v[i, :, :, lo:hi] = v.to(self.dtype)
-        kk, vv = self.k[i, :, :, :hi].to(q.dtype), self.v[i, :, :, :hi].to(q.dtype)
-        if lo == 0:
-            y = F.scaled_dot_product_attention(q, kk, vv, is_causal=True)
-        elif L == 1:
-            y = F.scaled_dot_product_attention(q, kk, vv)
-        else:   # new position j sees the cache and new positions <= j
-            mask = torch.arange(hi, device=x.device)[None] <= torch.arange(lo, hi, device=x.device)[:, None]
-            y = F.scaled_dot_product_attention(q, kk, vv, attn_mask=mask)
-        return a.proj(y.transpose(1, 2).reshape(B, L, D))
+def _block(i, blk, x, attend):
+    x = x + _attention(i, blk.attn, blk.n1(x), attend)
+    return x + blk.mlp(blk.n2(x))
+
+
+def _attention(i, a, x, attend):
+    B, L, D = x.shape
+    q, k, v = a.qkv(x).view(B, L, 3, a.h, a.dh).permute(2, 0, 3, 1, 4)
+    return a.proj(attend(i, q, k, v).transpose(1, 2).reshape(B, L, D))
+
+
+def _rope_rows(x, cos, sin):
+    """apply_rope with one position per row: x (B, H, 1, dh), cos and sin (B, 1, 1, dh / 2)."""
+    x1, x2 = x[..., 0::2], x[..., 1::2]
+    c, s = cos.to(x.dtype), sin.to(x.dtype)
+    return torch.stack([x1 * c - x2 * s, x1 * s + x2 * c], dim=-1).flatten(-2)

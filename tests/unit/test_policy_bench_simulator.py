@@ -7,7 +7,7 @@ from post_training.policy_bench.book import ASK, BID, Book, EMPTY_ASK_PRICE, L10
 from post_training.policy_bench.nanosigma.data import D_BOOK, START  # noqa: E402
 from post_training.policy_bench.nanosigma.model_newtok import NanoSigmaNewTok  # noqa: E402
 from post_training.policy_bench.nanosigma.newtok import VOCAB_NEW  # noqa: E402
-from post_training.policy_bench.simulator import KVSimulator  # noqa: E402
+from post_training.policy_bench.simulator import BatchKVSimulator, KVSimulator  # noqa: E402
 
 
 def _window(T=60, M=5, seed=0):
@@ -55,6 +55,57 @@ def test_feed_past_max_len_raises(model):
     sim = KVSimulator(model, max_len=8, dtype=torch.float32)
     with pytest.raises(ValueError):
         sim.feed(inp, book[mi])
+
+
+def test_batch_step_equals_each_rows_full_forward(model):
+    wins = [_window(seed=10 + b) for b in range(3)]
+    with torch.no_grad():
+        full = [model(inp[None], mi[None], book[None])[0] for inp, mi, book in wins]
+    sim = BatchKVSimulator(model, batch=3, max_len=128, dtype=torch.float32)
+    starts = [12, 25, 18]                                      # rows at different lengths
+    got = [[sim.prefill(b, inp[:s], book[mi[:s]])] for b, ((inp, mi, book), s) in enumerate(zip(wins, starts))]
+    pos = list(starts)
+    for t in range(14):
+        active = [True, t % 3 != 1, True]                      # row 1 sits out some steps
+        tok = torch.stack([w[0][p] for w, p in zip(wins, pos)])
+        bk = torch.stack([w[2][w[1][p]] for w, p in zip(wins, pos)])
+        out = sim.step(tok, bk, active)
+        for b in range(3):
+            if active[b]:
+                got[b].append(out[b:b + 1])
+                pos[b] += 1
+    assert sim.n == pos
+    for b in range(3):
+        torch.testing.assert_close(torch.cat(got[b]), full[b][:pos[b]], rtol=1e-5, atol=1e-5)
+
+
+def test_batch_truncate_rolls_back_one_row(model):
+    wins = [_window(seed=20 + b) for b in range(2)]
+    with torch.no_grad():
+        full = [model(inp[None], mi[None], book[None])[0] for inp, mi, book in wins]
+    sim = BatchKVSimulator(model, batch=2, max_len=128, dtype=torch.float32)
+    for b, (inp, mi, book) in enumerate(wins):
+        sim.prefill(b, inp[:30], book[mi[:30]])
+    junk = torch.randint(4, VOCAB_NEW, (2,))
+    sim.step(junk, torch.randn(2, D_BOOK))                     # row 0's token is rejected
+    sim.truncate(0, 30)
+    nxt = [30, 31]
+    tok = torch.stack([w[0][p] for w, p in zip(wins, nxt)])
+    tok[1] = junk[1]                                           # row 1 keeps its junk token
+    out = sim.step(tok, torch.stack([wins[0][2][wins[0][1][30]], torch.zeros(D_BOOK)]))
+    torch.testing.assert_close(out[0], full[0][30], rtol=1e-5, atol=1e-5)
+    assert sim.n == [31, 32]
+    with pytest.raises(ValueError):
+        sim.truncate(1, 40)
+
+
+def test_batch_step_on_a_full_row_raises(model):
+    sim = BatchKVSimulator(model, batch=2, max_len=4, dtype=torch.float32)
+    inp, mi, book = _window(T=4)
+    sim.prefill(0, inp, book[mi])
+    with pytest.raises(ValueError):
+        sim.step(inp[:2], book[mi[:2]])
+    sim.step(inp[:2], book[mi[:2]], active=[False, True])     # the full row sits out
 
 
 def _row(ask, bid, t=(0, 0)):
