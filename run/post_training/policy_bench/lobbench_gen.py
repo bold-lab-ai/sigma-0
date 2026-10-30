@@ -17,6 +17,11 @@ are renumbered from 1 per history (the scorer reads them as Int32).
 Samplers: mask (every draw masked to sampling.legal_tokens), reject (32
 whole-message draws, then masks), keep (a rejected draw stays in the token
 stream and the book is unchanged, nano-sigma's rule; it writes no row).
+Two negative controls draw uniformly among the legal tokens instead of from
+the model: uniform at every position, uniform_fields only at the price, size,
+queue-slot and end-of-execution positions (event, direction and dt still
+come from the model, under masks). If uniform_fields scored like mask, the
+masks and not the model would make the score.
 
     python run/post_training/policy_bench/lobbench_gen.py --config configs/policy_bench/v1.yaml \
         --shard_root <mount> --sampler mask --out <dir> [--n_histories 864 --shard 0 --n_shards 3]
@@ -38,13 +43,16 @@ from post_training.policy_bench.daydata import DayFiles
 from post_training.policy_bench.episodes import sample_episodes
 from post_training.policy_bench.policies import NoTrade
 from post_training.policy_bench.rollout import rollout
-from post_training.policy_bench.sampling import MAX_REJECTIONS
+from post_training.policy_bench.sampling import MAX_REJECTIONS, legal_tokens
 from post_training.policy_bench.sim_market import SimMarket
 from post_training.policy_bench.simulator import load_newtok
 from post_training.policy_bench.types import Episode
 
 SAMPLERS = {"mask": dict(max_rejections=0), "reject": dict(max_rejections=MAX_REJECTIONS),
-            "keep": dict(max_rejections=MAX_REJECTIONS, keep_invalid=True)}
+            "keep": dict(max_rejections=MAX_REJECTIONS, keep_invalid=True),
+            "uniform": dict(max_rejections=0), "uniform_fields": dict(max_rejections=0)}
+FIELDS = frozenset({"sign", "sign_or_eoe", "price1", "price2", "size1", "size2", "qslot"})
+UNIFORM = {"uniform": None, "uniform_fields": FIELDS}        # positions drawn uniformly (None: all)
 RAW = dict(oid=0, evt=1, d=2, price=3, size=5, t_s=8, t_ns=9)
 
 
@@ -62,6 +70,19 @@ class _Recording(SimMarket):
     def trace(self, i):
         self.out[(self.rows[i].ep.entry["message"], self.rows[i].ep.start)] = self.rows[i].rec
         return super().trace(i)
+
+
+class _Uniform(_Recording):
+    """A negative control: at the positions in `kinds` (None: all) a legal token drawn uniformly."""
+
+    kinds: frozenset | None = None
+
+    def _draw(self, r, logits):
+        st = r.state
+        if st.forced() is None and (self.kinds is None or st.kind() in self.kinds):
+            ok = legal_tokens(st, r.book, self._mid(r), r.end)
+            return int(ok[r.rng.integers(len(ok))])
+        return super()._draw(r, logits)
 
 
 def lobster_rows(msgs, ids):
@@ -106,10 +127,12 @@ def main():
     eps = [Episode(by_key[(hist[i]["month"], hist[i]["message"])], hist[i]["start"], hist[i]["seed"]) for i in ids]
 
     dev = torch.device("cuda")
-    market = _Recording(load_newtok(cfg["simulator"], dev), a.shard_root, cfg["add_dir"], cfg["batch"],
-                        history=cfg["history"], n_messages=a.n_gen, latency=cfg["latency"],
-                        inventory_cap=cfg["inventory_cap"], **SAMPLERS[a.sampler])
+    cls = _Uniform if a.sampler in UNIFORM else _Recording
+    market = cls(load_newtok(cfg["simulator"], dev), a.shard_root, cfg["add_dir"], cfg["batch"],
+                 history=cfg["history"], n_messages=a.n_gen, latency=cfg["latency"],
+                 inventory_cap=cfg["inventory_cap"], **SAMPLERS[a.sampler])
     market.out = {}
+    market.kinds = UNIFORM.get(a.sampler)
     t0 = time.time()
     traces = rollout(NoTrade(), None, market, eps, every=a.n_gen)
     seconds = time.time() - t0
