@@ -15,7 +15,7 @@ import pytest
 from post_training.policy_bench.book import (
     AGENT, ASK, BG, BID, EMPTY_ASK_PRICE, EMPTY_BID_PRICE, SLOT_NEW, SLOT_UNKNOWN, Book,
 )
-from post_training.policy_bench.daydata import DayFiles
+from post_training.policy_bench.daydata import DayFiles, Snapshots
 
 
 def _row(oid, evt, d, price, size):
@@ -151,3 +151,18 @@ def test_book_before_an_extra_row_includes_that_extra(tmp_path):
     day = _write_day(tmp_path)
     assert 9_900 in day.book_before(3).prices(BID)
     assert 9_900 not in day.book_before(2).prices(BID)
+
+
+@pytest.mark.parametrize("save", [np.savez, np.savez_compressed])
+def test_one_snapshot_equals_the_whole_archive(tmp_path, save):
+    z = dict(snap_row=np.array([0, 2, 5]), grid=np.array(2), lvl_ptr=np.array([0, 1, 4, 6]),
+             lvl_side=np.array([ASK, ASK, ASK, BID, ASK, BID], np.int8),
+             lvl_price=np.array([10_200, 10_100, 10_200, 10_000, 10_300, 9_800]),
+             ord_ptr=np.array([0, 1, 2, 4, 5, 6, 8]), ord_size=np.array([5, 7, 5, 3, 100, 9, 1, 2]),
+             ord_id=np.array([1, 11, 1, 13, 10, 20, 21, 22]))
+    save(tmp_path / "b.npz", **z)
+    snaps = Snapshots(str(tmp_path / "b.npz"))
+    for s in range(3):
+        a, b = Book.from_snapshot(z, s), Book.from_snapshot(snaps.one(s), 0)
+        assert a.levels(ASK) == b.levels(ASK) and a.levels(BID) == b.levels(BID)
+    assert snaps["ord_id"].tolist() == z["ord_id"].tolist() and int(snaps["grid"]) == 2

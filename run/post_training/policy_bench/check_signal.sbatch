@@ -2,7 +2,7 @@
 # G4 of the policy bench on one GPU: the return signal's test Pearson and our
 # processed rows. See check_signal.py for the checks.
 #
-#   OUT_DIR=<dir outside the repo> PYTHON=<env with torch>/bin/python \
+#   OUT_DIR=<dir outside the repo> ADD_DIR=<build_add_index.sbatch ADD_DIR> PYTHON=<env with torch>/bin/python \
 #       sbatch --nodes=1 --output=<dir>/%x_%j.out run/post_training/policy_bench/check_signal.sbatch
 #
 #SBATCH --job-name=policy-bench-g4
@@ -20,6 +20,7 @@ set -euo pipefail
 WORKDIR="${WORKDIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
 OUT_DIR="${OUT_DIR:?OUT_DIR is required}"
 PYTHON="${PYTHON:?PYTHON (an env with torch) is required}"
+ADD_DIR="${ADD_DIR:?ADD_DIR (build_add_index.sbatch, sim shards) is required}"
 Q=/projects/public/u6oz/quant
 # The signal was trained and scored on the bookfix shards with the v2 manifest;
 # the simulator's data are the v2_20261013 shards with the v3 manifest.
@@ -55,6 +56,6 @@ echo "commit $(git rev-parse HEAD) dirty=$(git status --porcelain | wc -l) host=
 
 "$PYTHON" run/post_training/policy_bench/check_signal.py \
   --signal_root "$MNT/sig" --signal_manifest "$SIGNAL_MANIFEST" \
-  --sim_root "$MNT/sim" --sim_manifest "$SIM_MANIFEST" --ckpt "$CKPT" \
+  --sim_root "$MNT/sim" --sim_manifest "$SIM_MANIFEST" --add_dir "$ADD_DIR" --ckpt "$CKPT" \
   --workers "$((SLURM_CPUS_PER_TASK - 8))" --out "$OUT_DIR/g4_${SLURM_JOB_ID}.json" "$@"
 chmod g+rw "$OUT_DIR/g4_${SLURM_JOB_ID}.json"

@@ -9,18 +9,21 @@ A. Reference. The vendored model and returnft_lobert_pass1's head on the
 B. Our rows. For --n_ours decisions on the simulator's data (v2_20261013 shards
    with the v3 full-book files), rebuild every processed row of the context
    from our book (price_rel with the day's clip and the reference columns via
-   AddRegistry and processed_row, the L10 rows via L10Writer) and compare with the files:
+   the day's add index, AddRegistry and processed_row, the L10 rows via
+   L10Writer) and compare with the files:
    all 14 message columns, all 43 L10 columns, the tokens and book vectors.
 
     python run/post_training/policy_bench/check_signal.py --signal_root <bookfix mnt> \
         --signal_manifest <v2>/test.json --sim_root <v2_20261013 mnt> \
-        --sim_manifest <v3>/test.json --ckpt <returnft_lobert_pass1>/ckpt.pt --out <file.json>
+        --sim_manifest <v3>/test.json --add_dir <build_add_index.py out_dir> \
+        --ckpt <returnft_lobert_pass1>/ckpt.pt --out <file.json>
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from collections import Counter
 from multiprocessing import Pool
@@ -106,7 +109,8 @@ def _ours_item(arg):
     e, s = arg
     P = G["P"]
     day = DayFiles.open(G["root"], e)
-    reg = AddRegistry.from_rows(day.messages[:s])
+    stem = os.path.splitext(os.path.basename(e["message"]))[0]
+    reg = AddRegistry(np.load(f"{G['add_dir']}/{e['month']}/{stem}_adds.npy", mmap_mode="r"), s)
     win = np.asarray(day.messages[s:s + P])
     bk = day.book_before(s)
     l10 = np.zeros((P + 1, 43), np.int64)
@@ -136,11 +140,11 @@ def _ours_item(arg):
     return dict(message=e["message"], start=s, first_bad_row=first_bad, counts=dict(c))
 
 
-def part_b(entries, root, P, H, n, workers, exclude):
+def part_b(entries, root, add_dir, P, H, n, workers, exclude):
     ds = [d for d in decisions(entries, P, H) if d[0]["message"] not in exclude]
     rng = np.random.default_rng(0)
     ds = [ds[i] for i in sorted(rng.choice(len(ds), min(n, len(ds)), replace=False))]
-    G.update(root=root, P=P)
+    G.update(root=root, add_dir=add_dir, P=P)
     t0 = time.time()
     with Pool(workers) as pool:
         res = pool.map(_ours_item, ds, chunksize=1)
@@ -157,6 +161,7 @@ def main():
     p.add_argument("--signal_manifest", required=True, help="v2 test.json")
     p.add_argument("--sim_root", required=True, help="v2_20261013 shards")
     p.add_argument("--sim_manifest", required=True, help="v3 test.json (fullbook_dir)")
+    p.add_argument("--add_dir", required=True, help="build_add_index.py out_dir, for the sim shards")
     p.add_argument("--ckpt", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--n_ours", type=int, default=2000)
@@ -173,7 +178,7 @@ def main():
     res = dict(torch=torch.__version__, horizons=sig.horizons, prefill=sig.prefill,
                days_differ_between_shards=sorted(differ),
                reference=dict(head_pearson_128=0.2979, decisions=70183, source="nano-sigma board, return bench 128"))
-    res["b"] = part_b(vm, a.sim_root, sig.prefill, sig.horizons, a.n_ours, a.workers, differ)
+    res["b"] = part_b(vm, a.sim_root, a.add_dir, sig.prefill, sig.horizons, a.n_ours, a.workers, differ)
     print("B", json.dumps(res["b"]["total"]), flush=True)
     if not a.skip_a:
         res["a"] = part_a(sig, sm, a.signal_root, a.workers, limit=a.limit_a)

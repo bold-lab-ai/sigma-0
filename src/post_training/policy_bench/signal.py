@@ -14,7 +14,9 @@ processed row depend on more than the message itself (job 7836700, 100%):
                 NA (-9999) when there is none (the order came from the
                 opening snapshot or a dropped raw message). NA for events 1
 
-`AddRegistry` and `processed_row` rebuild them for generated rows.
+`AddRegistry` and `processed_row` rebuild them for generated rows. A day's
+prefix is read once into its add index (`daydata.build_add_index`, stored by
+run/post_training/policy_bench/build_add_index.py), not per decision.
 `Signal.predict` is tools/return_features.py's decision geometry: P rows of
 context, the book at t, the feature at the first position of row P + 1, and
 the fine-tuned linear head scaled back to bps.
@@ -26,6 +28,7 @@ import numpy as np
 import torch
 
 from post_training.policy_bench.codec import mid_floor
+from post_training.policy_bench.daydata import build_add_index
 from post_training.policy_bench.nanosigma.data import MSG_TOKENS, NA_VAL, START, TICK, book_features, encode_messages
 from post_training.policy_bench.nanosigma.model import build_model
 
@@ -40,33 +43,37 @@ def price_rel_clip(message_file: str) -> int:
 
 
 class AddRegistry:
-    """Order id -> (price_rel, size, t_s, t_ns) of its first event-1 row."""
+    """Order id -> (price_rel, size, t_s, t_ns) of its first event-1 row.
 
-    def __init__(self) -> None:
+    Orders added before row `before` of the day come from the day's add index;
+    rows observed after that (real or generated) are kept in a dict."""
+
+    def __init__(self, index: np.ndarray | None = None, before: int = 0) -> None:
+        self._index, self._before = index, before
         self._ref: dict[int, tuple[int, int, int, int]] = {}
 
     @classmethod
-    def from_rows(cls, msg: np.ndarray, chunk: int = 1 << 20) -> "AddRegistry":
-        """The registry after the processed rows `msg` (e.g. rows 0..s of a day).
-        Reads in chunks, so `msg` can be a memory map of a whole day."""
-        reg = cls()
-        cols = [C_OID, C_PRICE_REL, C_SIZE, C_TS, C_TNS]
-        parts = []
-        for lo in range(0, len(msg), chunk):
-            m = np.asarray(msg[lo:lo + chunk])
-            parts.append(m[m[:, C_EVT] == 1][:, cols])
-        adds = np.concatenate(parts) if parts else np.zeros((0, len(cols)), np.int64)
-        oid, first = np.unique(adds[:, 0], return_index=True)
-        for o, r in zip(oid.tolist(), adds[first][:, 1:].tolist()):
-            reg._ref[o] = tuple(r)
-        return reg
+    def from_rows(cls, msg: np.ndarray) -> "AddRegistry":
+        """The registry after the processed rows `msg` (e.g. rows 0..s of a day)."""
+        return cls(build_add_index(msg), len(msg))
 
     def ref(self, oid: int) -> tuple[int, int, int, int]:
-        return self._ref.get(oid, (NA_VAL,) * 4)
+        r = self._lookup(oid)
+        return (NA_VAL,) * 4 if r is None else r
 
     def observe(self, row: np.ndarray) -> None:
-        if int(row[C_EVT]) == 1:
-            self._ref.setdefault(int(row[C_OID]), tuple(int(row[c]) for c in (C_PRICE_REL, C_SIZE, C_TS, C_TNS)))
+        oid = int(row[C_OID])
+        if int(row[C_EVT]) == 1 and self._lookup(oid) is None:
+            self._ref[oid] = tuple(int(row[c]) for c in (C_PRICE_REL, C_SIZE, C_TS, C_TNS))
+
+    def _lookup(self, oid: int) -> tuple[int, int, int, int] | None:
+        r = self._ref.get(oid)
+        ix = self._index
+        if r is None and ix is not None and ix.shape[1]:
+            i = int(np.searchsorted(ix[0], oid))
+            if i < ix.shape[1] and int(ix[0, i]) == oid and int(ix[1, i]) < self._before:
+                r = tuple(int(x) for x in ix[2:, i])
+        return r
 
 
 def processed_row(oid: int, evt: int, d: int, price: int, size: int, dt_s: int, dt_ns: int,

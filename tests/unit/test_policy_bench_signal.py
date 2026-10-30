@@ -4,6 +4,7 @@ import pytest
 pytest.importorskip("torch")
 
 from post_training.policy_bench.nanosigma.data import NA_VAL  # noqa: E402
+from post_training.policy_bench.daydata import build_add_index  # noqa: E402
 from post_training.policy_bench.signal import AddRegistry, price_rel_clip, processed_row  # noqa: E402
 
 NA4 = [NA_VAL] * 4
@@ -63,3 +64,18 @@ def test_registry_from_rows_keeps_the_first_add():
     msg = np.stack([_row(1, 1, 3, 10, 1, 2), _row(1, 1, 4, 11, 1, 3), _row(2, 3, 0, 5, 1, 4), _row(2, 1, -2, 6, 1, 5)])
     reg = AddRegistry.from_rows(msg)
     assert reg.ref(1) == (3, 10, 1, 2) and reg.ref(2) == (-2, 6, 1, 5) and reg.ref(9) == tuple(NA4)
+
+
+def test_add_index_answers_for_the_rows_before_the_decision():
+    msg = np.stack([_row(5, 1, 3, 10, 1, 2), _row(5, 3, 0, 4, 1, 3), _row(6, 1, -9999, 6, 1, 4),
+                    _row(5, 1, 8, 8, 1, 5), _row(7, 1, 2, 9, 1, 6)])
+    ix = build_add_index(msg[:, :], chunk=2)                     # chunks split the day
+    assert ix.flags.c_contiguous and ix.tolist() == [[5, 6, 7], [0, 2, 4], [3, -9999, 2],
+                                                     [10, 6, 9], [1, 1, 1], [2, 4, 6]]
+    reg = AddRegistry(ix, before=3)
+    assert reg.ref(5) == (3, 10, 1, 2) and reg.ref(6) == (-9999, 6, 1, 4)
+    assert reg.ref(7) == tuple(NA4) and reg.ref(4) == tuple(NA4) and reg.ref(9) == tuple(NA4)
+    reg.observe(_row(6, 1, 0, 0, 0, 0))                          # a known order whose price_rel is -9999
+    reg.observe(_row(7, 1, 1, 1, 1, 1))                          # added after the decision
+    assert reg.ref(6) == (-9999, 6, 1, 4) and reg.ref(7) == (1, 1, 1, 1)
+    assert AddRegistry(np.zeros((6, 0), np.int64)).ref(5) == tuple(NA4)
