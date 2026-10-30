@@ -6,7 +6,7 @@ clear of bad rows), the first --n_episodes of a fixed shuffle.
 
 G6a  NoTrade twice on the same episodes and seeds: identical traces.
 G6b  Two markets on the same episode and seed, one with a single agent limit
-     order one tick under the best bid at k = 0 (active at k = 1). Right after
+     order one tick under the best bid, submitted and applied at k = 1. Right after
      it is applied the two books differ by exactly that order. Then both run
      on; the first message after which the mids differ is reported (the order
      itself does not move the mid: any difference is the flow reacting).
@@ -70,6 +70,7 @@ def g6b(model, a, ep, n_steps):
     out = dict(books_equal_before=r0.book.levels(BID) == r1.book.levels(BID)
                and r0.book.levels(ASK) == r1.book.levels(ASK))
     price = r1.book.best(BID) - 100
+    mk[1].latency = 0                                 # due now, at k = 1
     mk[1].submit(0, [LimitOrder(BUY, price, 100)])
     mk[1]._activate(r1)                               # what advance() does first at k = 1
     extra = {p: [o for o in q if o not in r0.book.levels(BID).get(p, [])] for p, q in r1.book.levels(BID).items()}
