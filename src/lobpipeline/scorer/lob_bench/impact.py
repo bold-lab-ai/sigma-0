@@ -360,8 +360,9 @@ def impact_compare(loader:Simple_Loader,
         confidence_ints_gen.append(g_ci)
         confidence_ints_real.append(r_ci)
 
-        # Calculate sum of abs differences. 
-        delta=np.sum(np.abs(np.array(r_m)-np.array(g_m)))
+        # Mean of abs differences over the lag grid: Delta R_pi in eq. 7 of
+        # Nagy et al. (2025), LOB-Bench, which carries the 1/L factor.
+        delta=np.mean(np.abs(np.array(r_m)-np.array(g_m)))
         diff[event]=delta
     abs_diffs=np.array(list(diff.values()))
 
@@ -613,7 +614,7 @@ def run_impact(args):
                                 ticker=ticker,
                                 save_dir=args.save_dir+f"/impact/{ticker}/{model}",
                                 model=model)
-                print("Sum of differences of response function: ",res["Mean_Diffs"])
+                print("Mean over event types of the mean abs difference of response functions (eq. 7): ",res["Mean_Diffs"])
     if args.micro_plot:
         for ticker in args.stock:
             y_list=[]
