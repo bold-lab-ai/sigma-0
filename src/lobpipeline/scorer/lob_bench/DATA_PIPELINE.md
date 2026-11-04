@@ -118,12 +118,16 @@ Filter touch events (impact.py)
        |
        v
 Response Functions
-  For each event type and lag l = 1..1000:
+  For each event type and each of 20 log-spaced lags l in {1, 2, 3, 5, ..., 158, 199} (touch events):
     R(l) = mean midprice change from t to t+l, signed by trade direction
   Computed separately for real and generated sequences
        |
        v
-Output: response curves + sum of absolute differences (real vs gen)
+Output: response curves + Delta R_pi = mean over lags of |R_real(l) - R_gen(l)|
+  (eq. 7 of the LOB-Bench paper); Mean_Diffs = mean of Delta R_pi over the 6 types.
+  In impact.py as merged from upstream dc62ab4 (and upstream through 276baf3) this
+  was a sum over a 21-entry grid (lag 3 twice); old values are
+  not a constant multiple of new ones, so recompute from the saved curves.
 ```
 
 ## Full Automation (pipeline/)
