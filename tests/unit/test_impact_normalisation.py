@@ -90,3 +90,18 @@ def test_a_constant_gap_scores_that_gap_whatever_the_grid_length(impact, monkeyp
     monkeypatch.setattr(impact, "_apply_to_Sequences", _stub(table, seen))
     res = impact.impact_compare(loader=None, ticker="T", model="M", save_dir=str(tmp_path))
     assert res["Mean_Diffs"] == pytest.approx(c)
+
+
+def test_each_lag_is_evaluated_once(impact, monkeypatch, tmp_path):
+    """The int cast of 10**0.5 and 10**0.6 is 3 for both; lag 3 must not count twice.
+
+    A repeated lag repeats the same estimate, so it doubles that lag's weight in
+    the mean. Eq. 7 sums over distinct lags l = 1..L.
+    """
+    res, _table, seen = _run(impact, monkeypatch, tmp_path)
+    x = np.asarray(res["Saved_Tuple"][0])
+    assert np.all(np.diff(x) > 0), x
+    assert x[0] == 1 and x[-1] == 199 and len(x) == 20
+    for event in EVENTS:
+        lags = [lag for e, lag in seen if e == event]
+        assert len(lags) == len(set(lags)) == len(x)

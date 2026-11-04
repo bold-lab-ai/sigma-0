@@ -342,7 +342,9 @@ def impact_compare(loader:Simple_Loader,
                    model="BLANK",
                    ticksize=100,
                    save_dir='./'):
-    x=(10** np.arange(0.3,2.4,step=0.1)).astype(int)
+    # Log-spaced lags 1..199. The int cast maps 10**0.5 and 10**0.6 both to 3;
+    # np.unique keeps one, so each lag carries weight 1/L in eq. 7 (L = 20).
+    x=np.unique((10** np.arange(0.3,2.4,step=0.1)).astype(int))
     events=['MO_0','MO_1','LO_0','LO_1','CA_0','CA_1'] #'MO_0','MO_1'
     ys_real=[]
     ys_gen=[]
