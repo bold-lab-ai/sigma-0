@@ -905,6 +905,38 @@ def _curve_interval(value: Any) -> list[float] | None:
     return pair
 
 
+def _generated_observations(frames: Any, feature: str) -> list[int] | None:
+    """Per window, how many finite generated scores the driver compared.
+
+    The divergence pickle carries one score frame per window beside the
+    distances.  A window with no finite generated score was not measured, but
+    the driver still writes a distance for it: NaN for W1 and KS, and 0.0 for
+    L1, whose group counts become all zero.  Counting the frame is the only way
+    to tell that 0.0 from a real one.  ``None`` when the file carries no frames,
+    which keeps older pickles summarizable exactly as before.
+    """
+    if not isinstance(frames, Mapping):
+        return None
+    windows = frames.get(feature)
+    if not isinstance(windows, (list, tuple)) or not windows:
+        return None
+    counts: list[int] = []
+    for frame in windows:
+        try:
+            generated = frame.loc[frame["type"] == "generated", "score"]
+        except (AttributeError, KeyError, TypeError):
+            return None
+        counts.append(sum(1 for value in generated if _is_finite_number(value)))
+    return counts
+
+
+def _is_finite_number(value: Any) -> bool:
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
 def summarize_divergence_file(
     score_path: str | Path,
     *,
@@ -927,7 +959,7 @@ def summarize_divergence_file(
     """
     if horizon_length < 1:
         raise ValueError(f"horizon_length must be positive; got {horizon_length}")
-    path, scores, _ = _load_score_payload(score_path)
+    path, scores, frames = _load_score_payload(score_path)
 
     universe: tuple[str, ...] = SCORING_MODES["divergence"].pinned_features
     expected = _normalize_features(expected_features, universe)
@@ -948,13 +980,18 @@ def summarize_divergence_file(
         raw_curves = scores[feature]
         if not isinstance(raw_curves, Mapping):
             raise ValueError(f"{feature}: expected per-distance curve mapping")
+        observed = _generated_observations(frames, feature)
         if all(
             isinstance(raw_curves.get(distance), (list, tuple))
             and not raw_curves[distance]
             for distance in metric_names()
-        ):
-            # Every distance is an empty list: this score produced no window at
-            # this horizon.  Recorded and excluded, never averaged as a zero.
+        ) or (observed is not None and not any(observed)):
+            # Every distance is an empty list, or every window holds no
+            # generated observation: this score produced no window at this
+            # horizon.  Recorded and excluded, never averaged as a zero.  The
+            # second form is how the driver reports it in practice -- an OFI
+            # score inside a 100-message window yields W1 and KS as NaN and
+            # L1 as 0.0 -- so the empty-list test alone never fired.
             empty.append(feature)
             continue
         feature_curves[feature] = {}
@@ -968,7 +1005,9 @@ def summarize_divergence_file(
                     f"per-horizon scores; got {type(horizon_points).__name__}"
                 )
             curve = [
-                _curve_point(value, feature, distance, index)
+                None
+                if observed is not None and index < len(observed) and observed[index] == 0
+                else _curve_point(value, feature, distance, index)
                 for index, value in enumerate(horizon_points)
             ]
             feature_intervals.setdefault(feature, {})[distance] = [

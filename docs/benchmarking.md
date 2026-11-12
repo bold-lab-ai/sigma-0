@@ -265,11 +265,21 @@ recorded with `"standard": false`.
 
 Two properties of the scorer that the record does not hide:
 
-- At the default horizon the four OFI scores are `null` in every window, so the
-  W1 and KS panel means of the curve are `null` too. `orderflow_imbalance`
-  takes a 100-message rolling mean of a differenced series, which has no value
-  inside a window of 100 messages. L1 and the per-feature curves of the other
-  17 scores carry the time axis.
+- At the default horizon the four OFI scores have no windows.
+  `orderflow_imbalance` takes a 100-message rolling mean of a differenced
+  series, which has no value inside a window of 100 messages or fewer, for any
+  data. The driver still writes a distance for each such window (W1 and KS NaN,
+  L1 0.0), so `summarize_divergence_file` counts the generated observations in
+  each window's score frame: a window with none is `null` for every distance,
+  and a score with none in any window is listed in `scores_without_windows`
+  and left out of the panel. The curve is then a panel of 17,
+  `is_full_panel: false`. Before this, the OFI NaNs blanked the W1 and KS panel
+  means in every window and the L1 0.0s pulled the L1 panel mean down by 17/21.
+- A window can still be `null` for a score that has observations but a
+  non-finite one among them. `log_time_to_cancel` does this in the last,
+  partial window (messages 201 to 250) on synthetic data, which blanks the W1
+  and KS panel means at that window. That is the existing rule: a mean over a
+  smaller feature set is not reported.
 - The bootstrap intervals depend on the driver's shared random state, as noted
   above for shards, so they can change with the worker count and the order in
   which threads finish. This has not been measured. Point estimates do not

@@ -24,10 +24,9 @@ What is fixed
   record). The headline does not depend on it. The
   curve is reported exactly as ``summarize_divergence_file`` lays it out,
   including its ``null`` windows. At the default horizon of 100 the four OFI
-  scores are ``null`` in every window (their 100-message rolling mean needs
-  more than 100 messages), so the W1 and KS panel means are ``null`` too. That
-  is the summarizer's documented rule, kept here; the per-feature curves carry
-  the information.
+  scores have no windows (their 100-message rolling mean needs more than 100
+  messages), so the panel covers 17 scores and says so in
+  ``scores_without_windows`` and ``is_full_panel``.
 
 What the record holds
 ---------------------
