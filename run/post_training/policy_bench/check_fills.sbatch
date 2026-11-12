@@ -13,7 +13,7 @@
 #SBATCH --gpus=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=110G
-#SBATCH --time=04:00:00
+#SBATCH --time=12:00:00
 
 set -euo pipefail
 echo "start host=$(hostname) job=${SLURM_JOB_ID:-} $(date -Is)"
