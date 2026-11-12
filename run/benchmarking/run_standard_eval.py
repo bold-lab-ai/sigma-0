@@ -16,6 +16,12 @@ it once, and writes ``standard_eval.json`` beside the driver's own summaries.
 ``--no-divergence`` skips the divergence curve, which is a second scoring
 pass. The record then has ``divergence: null``.
 
+Optional extras, all off by default and none of them changing the headline:
+``--kl`` (KL divergence per feature, read from the score pickle, no rescoring),
+``--conditional``, ``--context`` and ``--time-lagged`` (one more driver run
+each). ``--all-extras`` turns all four on. A part that did not run is ``null``
+in the record, and ``provenance.seconds`` says what each part cost.
+
 ``--index-file`` exists for smoke tests on a small window set. A run on any
 index other than the canonical one is recorded with ``"standard": false``.
 """
@@ -25,6 +31,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -40,10 +47,14 @@ from lobpipeline.lob_bench.scoring import (  # noqa: E402
 )
 from lobpipeline.lob_bench.standard_eval import (  # noqa: E402
     CANONICAL_INDEX_FILE,
+    OPTIONAL_MODES,
+    STANDARD_TIME_LAG,
     build_record,
     directory_digest,
     load_protocol,
+    optional_mode_section,
     pooled_intervals,
+    pooled_kl,
     run_provenance,
     standard_scorer,
     write_record,
@@ -76,7 +87,29 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="skip the divergence curve; the record says so and the headline is unchanged",
     )
+    extras = parser.add_argument_group("optional extras (off by default)")
+    extras.add_argument("--kl", action="store_true",
+                        help="KL(real || generated) per feature, from the score pickle")
+    extras.add_argument("--conditional", action="store_true",
+                        help="the driver's cond mode: one more driver run")
+    extras.add_argument("--context", action="store_true",
+                        help="the driver's context mode (W1 and KS only): one more driver run")
+    extras.add_argument("--time-lagged", action="store_true",
+                        help=f"the driver's time_lagged mode at lag {STANDARD_TIME_LAG}: "
+                             "one more driver run")
+    extras.add_argument("--all-extras", action="store_true",
+                        help="all four extras above")
     args = parser.parse_args(argv)
+    if args.all_extras:
+        args.kl = args.conditional = args.context = args.time_lagged = True
+    wanted_modes = [
+        mode
+        for mode, on in (("cond", args.conditional), ("context", args.context),
+                         ("time_lagged", args.time_lagged))
+        if on
+    ]
+    assert set(wanted_modes) <= set(OPTIONAL_MODES)
+    seconds: dict[str, float] = {}
 
     protocol = load_protocol(args.index_file, divergence=not args.no_divergence)
     benchmark_root, scorer_tree = standard_scorer()
@@ -102,6 +135,7 @@ def main(argv: list[str] | None = None) -> int:
             "data_real": directory_digest(inference_dir / "data_real"),
             "data_cond": directory_digest(inference_dir / "data_cond"),
         }
+        started = time.monotonic()
         plan = build_lobbench_plan(
             run_name=args.run_name,
             inference_dir=inference_dir,
@@ -119,6 +153,36 @@ def main(argv: list[str] | None = None) -> int:
         divergence = (
             summarize_plan_divergence(plan) if protocol.divergence_horizon is not None else None
         )
+        seconds["headline" if divergence is None else "headline_and_divergence"] = round(
+            time.monotonic() - started, 1
+        )
+        kl = None
+        if args.kl:
+            started = time.monotonic()
+            kl = pooled_kl(plan.score_path)
+            seconds["kl"] = round(time.monotonic() - started, 1)
+        optional = {}
+        for mode in wanted_modes:
+            started = time.monotonic()
+            time_lag = STANDARD_TIME_LAG if mode == "time_lagged" else None
+            extra_plan = build_lobbench_plan(
+                run_name=args.run_name,
+                inference_dir=inference_dir,
+                output_dir=output_dir,
+                stock=protocol.stock,
+                period=protocol.period,
+                benchmark_root=benchmark_root,
+                python=args.python,
+                n_workers=args.n_workers,
+                mode=mode,
+                time_lag=time_lag,
+            )
+            optional[mode] = optional_mode_section(
+                execute_lobbench_plan(extra_plan),
+                scorer_tree_sha256=scorer_tree,
+                time_lag=time_lag,
+            )
+            seconds[mode] = round(time.monotonic() - started, 1)
 
     record = build_record(
         run_name=args.run_name,
@@ -126,12 +190,15 @@ def main(argv: list[str] | None = None) -> int:
         scorer_tree_sha256=scorer_tree,
         pooled=pooled,
         divergence=divergence,
+        kl=kl,
+        optional=optional,
         intervals=pooled_intervals(plan.score_path),
         inputs=inputs,
         provenance=run_provenance(
             python=args.python,
             n_workers=args.n_workers,
             generation_manifest=args.generation_manifest,
+            seconds=seconds,
         ),
     )
     destination = write_record(record, Path(plan.results_dir) / "standard_eval.json")

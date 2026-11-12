@@ -33,8 +33,33 @@ What the record holds
 WS-21, KS-21 and L1-21; every feature's point estimate with its bootstrap
 interval; the divergence curves; and the provenance: sigma-0 commit, scorer
 hash, sample-index hash, a hash of each input directory, the scoring
-interpreter's packages, worker count and Slurm job. A run that cannot produce
-the three headline numbers writes no record.
+interpreter's packages, worker count, Slurm job and the time each part took.
+A run that cannot produce the three headline numbers writes no record.
+
+Optional parts
+--------------
+Each is off unless asked for, and none of them changes the headline. A part
+that was not run is ``null`` in the record.
+
+- ``kl``: the Kullback-Leibler divergence KL(real || generated) of each of the
+  21 features. It is computed here from the unconditional score pickle, which
+  already holds every real and generated value with the bin the scorer's L1
+  used, so it needs no second scoring pass and no change to the pinned scorer.
+  Each bin gets one pseudo-count on each side, so a bin the generated data
+  never reaches gives a large but finite value. KL is unbounded, so its mean
+  over the features is dominated by the worst one; read the features.
+- ``conditional``: the driver's ``cond`` mode, a second driver run. Three scores,
+  each one feature compared within bins of another.
+- ``context``: the driver's ``context`` mode, a second driver run. Its L1 is a
+  structural zero (see docs/benchmarking.md), so the record keeps W1 and KS
+  and writes L1 as ``null``.
+- ``time_lagged``: the driver's ``time_lagged`` mode, a second driver run, at
+  a lag of ``STANDARD_TIME_LAG`` messages. The driver's own lag of 500 needs
+  sequences longer than 500 messages; ours are 250 + 250, so at 500 every
+  window is dropped and the driver fails. At 250 the lagged value always comes
+  from the conditioning messages and the evaluated value from the generated
+  ones. The driver's score names still say ``t-lag=500``; the record states
+  the lag that ran.
 """
 
 from __future__ import annotations
@@ -73,6 +98,18 @@ CANONICAL_INDEX_FILE = (
 )
 STANDARD_MODE = "uncond"
 STANDARD_DIVERGENCE_HORIZON = DEFAULT_DIVERGENCE_HORIZON
+# Messages between the lagged and the evaluated value in the time-lagged mode.
+# Equal to the generated length, so the lag spans conditioning -> generation.
+STANDARD_TIME_LAG = 250
+# Driver modes the record can carry as optional sections, in run order.
+OPTIONAL_MODES = ("cond", "context", "time_lagged")
+OPTIONAL_SECTION = {"cond": "conditional", "context": "context", "time_lagged": "time_lagged"}
+KL_METHOD = {
+    "direction": "real || generated",
+    "bins": "the scorer's L1 bins (the score frame's group column)",
+    "smoothing": "one pseudo-count per bin on each side",
+    "units": "nats",
+}
 
 
 @dataclass(frozen=True)
@@ -193,6 +230,111 @@ def pooled_intervals(
     return out
 
 
+def binned_kl(real_groups: Sequence[Any], generated_groups: Sequence[Any]) -> float | None:
+    """KL(real || generated) over shared bins, with one pseudo-count per bin.
+
+    ``None`` when either side has no observation, which is no measurement.
+    """
+    real_counts: dict[Any, int] = {}
+    generated_counts: dict[Any, int] = {}
+    for group in real_groups:
+        real_counts[group] = real_counts.get(group, 0) + 1
+    for group in generated_groups:
+        generated_counts[group] = generated_counts.get(group, 0) + 1
+    if not real_counts or not generated_counts:
+        return None
+    bins = set(real_counts) | set(generated_counts)
+    real_total = sum(real_counts.values()) + len(bins)
+    generated_total = sum(generated_counts.values()) + len(bins)
+    divergence = 0.0
+    for group in bins:
+        p = (real_counts.get(group, 0) + 1) / real_total
+        q = (generated_counts.get(group, 0) + 1) / generated_total
+        divergence += p * math.log(p / q)
+    return max(divergence, 0.0)
+
+
+def _finite_groups(frame: Any, side: str) -> list[Any]:
+    rows = frame.loc[frame["type"] == side]
+    return [
+        group
+        for group, score in zip(rows["group"], rows["score"])
+        if _finite(score)
+    ]
+
+
+def _finite(value: Any) -> bool:
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def pooled_kl(
+    score_path: str | Path, features: Sequence[str] = LOBBENCH_FEATURES
+) -> dict[str, Any]:
+    """KL(real || generated) per feature, from the unconditional score pickle.
+
+    The pickle's second element maps each feature to its score frame: one row
+    per value, with ``score``, ``group`` (the L1 bin) and ``type``. The values
+    and bins are the scorer's own, so nothing is rescored.
+    """
+    with gzip.open(Path(score_path), "rb") as handle:
+        frames = pickle.load(handle)[1]
+    per_feature: dict[str, float | None] = {}
+    for feature in features:
+        frame = frames.get(feature) if isinstance(frames, Mapping) else None
+        if frame is None:
+            raise ValueError(f"{score_path}: no score frame for {feature}")
+        per_feature[feature] = binned_kl(
+            _finite_groups(frame, "real"), _finite_groups(frame, "generated")
+        )
+    measured = [value for value in per_feature.values() if value is not None]
+    return {
+        **KL_METHOD,
+        "mean": sum(measured) / len(measured) if len(measured) == len(features) else None,
+        "features": per_feature,
+    }
+
+
+def optional_mode_section(
+    summary: LobbenchSummary, *, scorer_tree_sha256: str, time_lag: int | None = None
+) -> dict[str, Any]:
+    """One optional driver mode as a record section.
+
+    The context mode's L1 is a structural zero, so it is written as ``null``
+    rather than as a number someone could read.
+    """
+    if summary.benchmark_revision != scorer_tree_sha256:
+        raise ValueError(
+            f"{summary.mode} summary names scorer {summary.benchmark_revision}, "
+            f"verified tree is {scorer_tree_sha256}"
+        )
+    drop = {"l1"} if summary.mode == "context" else set()
+    features = {
+        name: {
+            distance: (None if distance in drop else value)
+            for distance, value in scores.items()
+        }
+        for name, scores in summary.feature_scores.items()
+    }
+    means = {
+        distance: (None if distance in drop else value)
+        for distance, value in summary.distances.items()
+    }
+    section: dict[str, Any] = {
+        "mode": summary.mode,
+        "score_path": summary.score_path,
+        "means": means,
+        "features": features,
+    }
+    if summary.mode == "time_lagged":
+        section["time_lag"] = time_lag
+    if drop:
+        section["note"] = "L1 is a structural zero in this mode and is not reported."
+    return section
+
+
 def interpreter_packages(python: str) -> dict[str, str]:
     """Installed distributions of the scoring interpreter, name to version."""
     probe = (
@@ -245,8 +387,14 @@ def build_record(
     intervals: Mapping[str, Mapping[str, list[float] | None]],
     inputs: Mapping[str, Any],
     provenance: Mapping[str, Any],
+    kl: Mapping[str, Any] | None = None,
+    optional: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Assemble the standard record, refusing a run without its headline numbers."""
+    """Assemble the standard record, refusing a run without its headline numbers.
+
+    ``optional`` maps a driver mode (``cond``, ``context``, ``time_lagged``) to
+    its section from ``optional_mode_section``. A mode left out is ``null``.
+    """
     headline = {"ws21": pooled.ws21, "ks21": pooled.ks21, "l1_21": pooled.l1_21}
     missing = [name for name, value in headline.items() if value is None]
     if missing:
@@ -271,6 +419,15 @@ def build_record(
             f"divergence horizon {divergence.horizon_length}, "
             f"standard is {protocol.divergence_horizon}"
         )
+    optional = dict(optional or {})
+    unknown = sorted(set(optional) - set(OPTIONAL_MODES))
+    if unknown:
+        raise ValueError(f"unknown optional modes: {unknown}")
+    for mode, section in optional.items():
+        if section.get("mode") != mode:
+            raise ValueError(f"optional section for {mode} holds mode {section.get('mode')!r}")
+    if kl is not None and set(kl.get("features", {})) != set(LOBBENCH_FEATURES):
+        raise ValueError("the KL section does not cover the 21 pinned features")
     features = {
         feature: {
             distance: {
@@ -296,6 +453,9 @@ def build_record(
         "headline": headline,
         "features": features,
         "divergence": divergence_fields,
+        "kl": dict(kl) if kl is not None else None,
+        **{OPTIONAL_SECTION[mode]: (dict(optional[mode]) if mode in optional else None)
+           for mode in OPTIONAL_MODES},
         "scorer": {
             "tree_sha256": scorer_tree_sha256,
             "benchmark_root": pooled.benchmark_root,
@@ -308,10 +468,15 @@ def build_record(
 
 
 def run_provenance(
-    *, python: str, n_workers: int, generation_manifest: str | Path | None
+    *,
+    python: str,
+    n_workers: int,
+    generation_manifest: str | Path | None,
+    seconds: Mapping[str, float] | None = None,
 ) -> dict[str, Any]:
-    """Where and how the evaluation ran."""
+    """Where and how the evaluation ran, and how long each part took."""
     provenance: dict[str, Any] = {
+        "seconds": dict(seconds or {}),
         "sigma0": repository_state(),
         "scoring_python": python,
         "scoring_packages": interpreter_packages(python),

@@ -263,6 +263,25 @@ agree. The curve compares only between records that both have it.
 `--index-file` takes another frozen index for smoke tests. Such a run is
 recorded with `"standard": false`.
 
+Four optional extras are off by default. None of them changes the headline. A
+part that did not run is `null` in the record, and `provenance.seconds` holds
+what each part took. `--all-extras` turns on all four.
+
+| Flag | Record section | What it adds | Cost |
+|---|---|---|---|
+| `--kl` | `kl` | KL(real \|\| generated) per feature, over the scorer's L1 bins, one pseudo-count per bin on each side | read from the score pickle; no rescoring |
+| `--conditional` | `conditional` | the three `cond` scores | one more driver run |
+| `--context` | `context` | the `context` score, W1 and KS only; L1 is `null` (see "Do not read the contextual L1") | one more driver run |
+| `--time-lagged` | `time_lagged` | the three `time_lagged` scores at lag 250 | one more driver run |
+
+KL is unbounded, so its mean over the 21 features is dominated by the worst
+one. Read the per-feature values. The time-lagged mode runs at lag 250 because
+the driver's own lag of 500 needs sequences longer than 500 messages. Ours are
+250 + 250, so at 500 the driver drops every window and fails. At 250 the
+lagged value comes from the conditioning messages and the evaluated value from
+the generated ones. The driver's score names still read `t-lag=500`; the
+record's `time_lag` is the lag that ran.
+
 Two properties of the scorer that the record does not hide:
 
 - At the default horizon the four OFI scores have no windows.
