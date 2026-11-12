@@ -225,6 +225,55 @@ first. Compare `feature_scores`, not `ci`, when checking one against the other.
 `model_zoo_lobbench_score_array.batch` is unchanged and still unsharded: its
 array index is already architecture times seed, and it guards a published WS-21.
 
+### The standard evaluation
+
+`run_lobbench.py` leaves the protocol to its caller. Two runs that both print a
+WS-21 can differ in their windows, scorer root or horizon, and the summary does
+not say so. `run/benchmarking/run_standard_eval.py` fixes the protocol and
+writes one record, `standard_eval.json`, that says what was compared:
+
+```bash
+PYTHONPATH=src python run/benchmarking/run_standard_eval.py \
+    --inference-dir <evaluation>/inference.sqfs \
+    --output-dir <outside the repository> \
+    --run-name <architecture>_seed<seed> \
+    --python "$WORKDIR/envs/lobbench_venv/bin/python" \
+    --generation-manifest <evaluation>/generation_complete.json
+```
+
+What is fixed, in `src/lobpipeline/lob_bench/standard_eval.py`:
+
+| | Standard |
+|---|---|
+| Windows | the frozen index `model_zoo_GOOG_jan2026_3136_seq500_seed42.txt`; its SHA-256 must equal the value in its metadata |
+| Inputs | `validate_inference` before scoring: 3,136 windows, 250 rows each (251 conditioning book rows), the rank manifests' window list equal to the index |
+| Scorer | the merged tree, re-hashed from disk against `merge.json`; never the Lustre default |
+| Mode | `uncond` with the divergence curve at the default horizon (100) |
+
+The record holds WS-21, KS-21 and L1-21; each feature's point estimate and
+pooled bootstrap interval; the divergence summary as
+`summarize_divergence_file` writes it; a SHA-256 of `data_gen/`, `data_real/`
+and `data_cond/`; and the sigma-0 commit (with any change under `src/`, `run/`
+or `envs/`), the scoring interpreter's packages, the worker count, the Slurm job
+and the generation manifest. A run without the three headline numbers writes no
+record. Two records are comparable when their `protocol`, `scorer.tree_sha256`
+and `inputs.data_real.sha256` agree.
+
+`--index-file` takes another frozen index for smoke tests. Such a run is
+recorded with `"standard": false`.
+
+Two properties of the scorer that the record does not hide:
+
+- At the default horizon the four OFI scores are `null` in every window, so the
+  W1 and KS panel means of the curve are `null` too. `orderflow_imbalance`
+  takes a 100-message rolling mean of a differenced series, which has no value
+  inside a window of 100 messages. L1 and the per-feature curves of the other
+  17 scores carry the time axis.
+- The bootstrap intervals depend on the driver's shared random state, as noted
+  above for shards, so they can change with the worker count and the order in
+  which threads finish. This has not been measured. Point estimates do not
+  depend on it.
+
 ## The event-anchored return bench
 
 What the mid-price does N milliseconds after a real trade executes, and whether
