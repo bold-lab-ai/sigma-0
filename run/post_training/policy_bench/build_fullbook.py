@@ -12,16 +12,23 @@ script that is not readable to us). This rebuilds them from the raw L0 day:
    events of type 1-4, minus far orders (price < R / 100 or > 100 R, R the mean
    price of those events), minus the first one. The rule is checked against the
    processed file: order id (int32), event, direction, price, size (<= 9,999)
-   and time must be equal row by row.
+   and time must be equal row by row. On a day whose raw messages begin after
+   the open the file drops more at the start; the start is then taken from
+   the file's first row (late_start).
 3. One replay of the whole day (pre-market included) with book.Book, which
    keeps every order id in its FIFO queue: event 1 adds at the back, 2 takes
-   shares, 3 deletes, 4 executes, 5 to 7 leave the book alone. That is
-   l10dump.cpp with --legacy-no-cross-cleanup, the rule the processed L10 files
-   were made with: dropping the asks below and bids above a cross (event 6)
-   loses orders that later rows still reference (--cross_cleanup, job 8358944).
+   shares, 3 deletes, 4 executes, 5 and 7 leave the book alone. Event 6 (a
+   cross) leaves it alone too, except with --cross_cleanup, which drops the
+   asks below and bids above a cross with a price. The existing queue and
+   book_full files were made with that cleanup (AAPL 2026-01-28, INTC
+   2026-01-15: asks below the opening cross that arrived in the same instant
+   are marked unknown, jobs 8362586, 8362625); the processed L10 files
+   without it (their top 10 keep those asks). A cross at price 0 (a listing
+   on another exchange) never cleans: it would drop every bid (job 8358944).
 4. Outputs, by processed row R:
    queue      (n, 2) int32 [slot, orders in the level] before row R, codes of
-              book.apply_row (-1 for event 1, -2 for an order not in the book)
+              book.apply_row (-1 for event 1; -2 in both columns for an order
+              not in the book)
    book_full  every order of the book before rows 0, grid, 2 grid, ...: asks
               by ascending price, then bids by descending price, FIFO in a level
    extra      regular-hours events after the first processed row that the
@@ -34,7 +41,7 @@ script that is not readable to us). This rebuilds them from the raw L0 day:
               equal the processed L10 file
 
 --compare_dir checks each built day against existing files of the same stem,
-array by array.
+array by array; --compare_dir manifest reads them from each entry's fullbook_dir.
 
     python run/post_training/policy_bench/build_fullbook.py --shard_root <mount> --lobster <quant>/lobster \
         --manifest <file.json> --month 2026-01 --out_dir <dir> [--compare_dir <dir>] [--limit 20]
@@ -110,6 +117,24 @@ def check_alignment(raw: dict, proc: np.ndarray, msg: np.ndarray) -> int:
     return int((ours != theirs).any(1).sum())
 
 
+def late_start(raw: dict, proc: np.ndarray, msg: np.ndarray, look: int = 1000) -> int:
+    """Leading rows of `proc` before the processed file's first row (0 on almost every day).
+
+    A day whose raw messages begin after the open has more rows dropped at the
+    start (AMCR 2026-01-15: first raw event at 34,284 s, 10 more rows, job
+    8363129). That file came from the original pipeline, not regen.py, whose
+    rule there is unknown, so the start is taken from the file: the first of
+    our rows with the time, order id and event of its row 0."""
+    if len(proc) <= len(msg) or not len(msg):
+        return 0
+    m0 = (int(msg[0, 8]), int(msg[0, 9]), int(msg[0, 0]), int(msg[0, 1]))
+    for s in range(min(look, len(proc) - len(msg) + 1)):
+        i = proc[s]
+        if (int(raw["sec"][i]), int(raw["ns"][i]), int(np.int32(np.int64(raw["oid"][i]))), int(raw["typ"][i])) == m0:
+            return s
+    return 0
+
+
 def snapshot(bk: Book) -> tuple[list, list, list, np.ndarray, np.ndarray]:
     """(level sides, level prices, orders per level, order ids, order sizes) of the whole book."""
     sides, prices, counts, ids, sizes = [], [], [], [], []
@@ -126,8 +151,12 @@ def snapshot(bk: Book) -> tuple[list, list, list, np.ndarray, np.ndarray]:
 
 def build(raw: dict, msg: np.ndarray, l10: np.ndarray, grid: int = GRID, cross_cleanup: bool = False) -> dict:
     proc, far = processed_index(raw)
+    lead = late_start(raw, proc, msg)
+    proc = proc[lead:]
     n = len(proc)
     bad_align = check_alignment(raw, proc, msg)
+    if len(proc) != len(msg):
+        raise ValueError(f"the processed rule gives {len(proc)} rows, the processed file has {len(msg)}")
     role = np.zeros(len(raw["t"]), np.int8)                 # 0 book only, 1 processed, 2 extra
     role[proc] = 1
     far = far[far > proc[0]] if n else far[:0]
@@ -147,7 +176,7 @@ def build(raw: dict, msg: np.ndarray, l10: np.ndarray, grid: int = GRID, cross_c
     cols = zip(oid32.tolist(), raw["typ"].tolist(), d01.tolist(), raw["price"].tolist(), raw["size"].tolist(),
                row_of.tolist(), role.tolist())
     for oid, typ, d, price, size, r, rl in cols:
-        if typ == 6 and not cross_cleanup:
+        if typ == 6 and not (cross_cleanup and price > 0):
             k_ex += int(rl == 2)                              # an extra, slot -1, book unchanged
             continue
         row = (oid, typ, d, price, 0, size)
@@ -163,7 +192,9 @@ def build(raw: dict, msg: np.ndarray, l10: np.ndarray, grid: int = GRID, cross_c
         slot = bk.apply_row(row)
         if r >= 0:
             queue[r, 0] = slot
-            unknown += int(slot == -2)
+            if slot == -2:                                    # the files write -2 for both columns
+                queue[r, 1] = -2
+                unknown += 1
         elif rl == 2:
             ex_slot[k_ex] = slot
             k_ex += 1
@@ -187,7 +218,7 @@ def build(raw: dict, msg: np.ndarray, l10: np.ndarray, grid: int = GRID, cross_c
         bigsize=dict(row=row_of[big], size=raw["size"][big].astype(np.int64)),
         replay=dict(proc_msgs=n, proc_book_rows=int(len(l10)), raw_member=raw["member"], raw_msgs=int(len(raw["t"])),
                     raw_types=np.bincount(raw["typ"], minlength=8)[1:8].tolist(), align_bad_rows=bad_align,
-                    unknown_refs=unknown, top10_match_rate=1 - top_bad / max(n, 1), n_extra=int(len(far)),
+                    late_start_rows=lead, unknown_refs=unknown, top10_match_rate=1 - top_bad / max(n, 1), n_extra=int(len(far)),
                     n_snapshots=len(snap_row), n_snapshot_levels=int(lp[-1]), n_snapshot_orders=int(n_ord)),
     )
 
@@ -217,6 +248,9 @@ def compare(out: dict, base: str) -> dict:
             diff[name] = dict(rows=int(len(bad)) if len(q) == len(out["queue"]) else "shape",
                               first=[(int(r), q[r].tolist(), out["queue"][r].tolist()) for r in bad[:3]])
     for name in ("book_full", "extra", "bigsize"):
+        if not os.path.exists(f"{base}_{name}.npz"):
+            diff[name] = "missing"
+            continue
         z = np.load(f"{base}_{name}.npz")
         for k in z.files:
             a, b = np.asarray(z[k]), np.asarray(out[name][k])
@@ -235,13 +269,19 @@ def _item(arg):
     l10 = np.load(os.path.join(root, entry["orderbook"]), mmap_mode="r")
     with tempfile.TemporaryDirectory(dir=a.tmp) as tmp:
         raw = raw_day(a.lobster, entry["ticker"], entry["date"], tmp)
-    out = build(raw, msg, l10, cross_cleanup=a.cross_cleanup)
+    try:
+        out = build(raw, msg, l10, cross_cleanup=a.cross_cleanup)
+    except Exception as err:                                  # noqa: BLE001 (reported per day; the run goes on)
+        return dict(ticker=entry["ticker"], date=entry["date"], error=f"{type(err).__name__}: {err}"[:500],
+                    seconds=round(time.time() - t0, 1))
     res = dict(ticker=entry["ticker"], date=entry["date"], **{k: v for k, v in out["replay"].items() if k != "raw_member"})
     if a.out_dir:
         d = os.path.join(a.out_dir, entry["month"], entry["ticker"])
         os.makedirs(d, exist_ok=True)
         write(out, os.path.join(d, stem(entry)))
-    if a.compare_dir:
+    if a.compare_dir == "manifest":
+        res["diff"] = compare(out, os.path.join(entry["fullbook_dir"], stem(entry)))
+    elif a.compare_dir:
         res["diff"] = compare(out, os.path.join(a.compare_dir, entry["month"], entry["ticker"], stem(entry)))
     res["seconds"] = round(time.time() - t0, 1)
     return res
@@ -254,11 +294,13 @@ def main():
     p.add_argument("--manifest", required=True)
     p.add_argument("--month", required=True)
     p.add_argument("--out_dir", default="", help="write the files under <out_dir>/<month>/<ticker>/")
-    p.add_argument("--compare_dir", default="", help="compare with <compare_dir>/<month>/<ticker>/<stem>_*")
+    p.add_argument("--compare_dir", default="", help="compare with <compare_dir>/<month>/<ticker>/<stem>_*, or 'manifest': each "
+                   "entry's fullbook_dir (8 META days of Jan 2026 point to the _v3changed tree)")
     p.add_argument("--tickers", default="", help="comma-separated; default all")
     p.add_argument("--limit", type=int, default=0, help="first N days after the seed shuffle (0: all)")
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--cross_cleanup", action="store_true", help="drop crossed orders at event 6 (not the data's rule)")
+    p.add_argument("--cross_cleanup", action="store_true", help="drop asks below and bids above a cross (event 6) with a price; "
+                   "the rule of the existing queue and book_full files")
     p.add_argument("--workers", type=int, default=32)
     p.add_argument("--tmp", default=os.environ.get("TMPDIR", "/tmp"))
     p.add_argument("--report", required=True, help="one JSON line per day")
@@ -280,6 +322,9 @@ def main():
         for k, res in enumerate(pool.imap_unordered(_item, todo)):
             rep.write(json.dumps(res) + "\n")
             rep.flush()
+            if "error" in res:
+                print(f"{k + 1}/{len(todo)} {res['ticker']} {res['date']} ERROR {res['error']}", flush=True)
+                continue
             ok = not res.get("diff") and res["align_bad_rows"] == 0 and res["top10_match_rate"] == 1.0
             print(f"{k + 1}/{len(todo)} {res['ticker']} {res['date']} {res['seconds']} s "
                   f"{'ok' if ok else 'DIFF ' + json.dumps({x: res[x] for x in ('align_bad_rows', 'top10_match_rate')}) + ' ' + json.dumps(res.get('diff'))[:600]}",
