@@ -257,3 +257,24 @@ def test_windows_that_differ_from_the_index_are_refused_before_scoring(
                 "--index-file", str(index),
             ]
         )
+
+
+def test_skipping_the_curve_is_recorded_and_keeps_the_headline(tmp_path: Path) -> None:
+    protocol = load_protocol(_index(tmp_path, [3, 7]), divergence=False)
+    assert protocol.divergence_horizon is None
+    record = _record(tmp_path, protocol=protocol, divergence=None)
+    assert record["divergence"] is None
+    assert record["protocol"]["divergence_horizon"] is None
+    assert record["scorer"]["divergence_score_path"] is None
+    assert record["headline"]["ws21"] == 0.5
+
+
+def test_a_curve_the_protocol_did_not_ask_for_is_refused(tmp_path: Path) -> None:
+    protocol = load_protocol(_index(tmp_path, [3, 7]), divergence=False)
+    with pytest.raises(ValueError, match="scored but the protocol"):
+        _record(tmp_path, protocol=protocol)
+
+
+def test_a_missing_curve_the_protocol_asked_for_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="skipped but the protocol"):
+        _record(tmp_path, divergence=None)

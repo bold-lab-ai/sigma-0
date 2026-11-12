@@ -248,7 +248,7 @@ What is fixed, in `src/lobpipeline/lob_bench/standard_eval.py`:
 | Windows | the frozen index `model_zoo_GOOG_jan2026_3136_seq500_seed42.txt`; its SHA-256 must equal the value in its metadata |
 | Inputs | `validate_inference` before scoring: 3,136 windows, 250 rows each (251 conditioning book rows), the rank manifests' window list equal to the index |
 | Scorer | the merged tree, re-hashed from disk against `merge.json`; never the Lustre default |
-| Mode | `uncond` with the divergence curve at the default horizon (100) |
+| Mode | `uncond` with the divergence curve at the default horizon (100); `--no-divergence` skips the curve and records `divergence_horizon: null` |
 
 The record holds WS-21, KS-21 and L1-21; each feature's point estimate and
 pooled bootstrap interval; the divergence summary as
@@ -256,8 +256,9 @@ pooled bootstrap interval; the divergence summary as
 and `data_cond/`; and the sigma-0 commit (with any change under `src/`, `run/`
 or `envs/`), the scoring interpreter's packages, the worker count, the Slurm job
 and the generation manifest. A run without the three headline numbers writes no
-record. Two records are comparable when their `protocol`, `scorer.tree_sha256`
-and `inputs.data_real.sha256` agree.
+record. The headline compares across records when their `protocol` (apart from
+`divergence_horizon`), `scorer.tree_sha256` and `inputs.data_real.sha256`
+agree. The curve compares only between records that both have it.
 
 `--index-file` takes another frozen index for smoke tests. Such a run is
 recorded with `"standard": false`.

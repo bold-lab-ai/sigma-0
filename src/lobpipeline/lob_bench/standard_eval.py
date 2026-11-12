@@ -19,7 +19,9 @@ What is fixed
 - The scorer is the merged in-repo tree, never the Lustre default.
   ``merged_benchmark_root`` recomputes its hash from the files on disk and
   refuses a tree that differs from ``merge.json``.
-- The mode is ``uncond`` with the divergence curve at the default horizon. The
+- The mode is ``uncond`` with the divergence curve at the default horizon,
+  unless the run asks to skip the curve (``divergence_horizon: null`` in the
+  record). The headline does not depend on it. The
   curve is reported exactly as ``summarize_divergence_file`` lays it out,
   including its ``null`` windows. At the default horizon of 100 the four OFI
   scores are ``null`` in every window (their 100-message rolling mean needs
@@ -88,10 +90,15 @@ class StandardProtocol:
     generated_messages: int
     dataset_length: int | None
     mode: str
-    divergence_horizon: int
+    # ``None`` when the run skips the divergence curve. The headline numbers do
+    # not depend on it, so records with and without the curve still compare on
+    # the headline; only the curve itself is absent.
+    divergence_horizon: int | None
 
 
-def load_protocol(index_file: str | Path = CANONICAL_INDEX_FILE) -> StandardProtocol:
+def load_protocol(
+    index_file: str | Path = CANONICAL_INDEX_FILE, *, divergence: bool = True
+) -> StandardProtocol:
     """Read a frozen sample index and its metadata, refusing a modified file.
 
     A non-canonical index is allowed so the command can be smoke-tested on a
@@ -130,7 +137,7 @@ def load_protocol(index_file: str | Path = CANONICAL_INDEX_FILE) -> StandardProt
         generated_messages=int(metadata["generated_messages"]),
         dataset_length=metadata.get("dataset_length"),
         mode=STANDARD_MODE,
-        divergence_horizon=STANDARD_DIVERGENCE_HORIZON,
+        divergence_horizon=STANDARD_DIVERGENCE_HORIZON if divergence else None,
     )
 
 
@@ -235,7 +242,7 @@ def build_record(
     protocol: StandardProtocol,
     scorer_tree_sha256: str,
     pooled: LobbenchSummary,
-    divergence: LobbenchDivergenceSummary,
+    divergence: LobbenchDivergenceSummary | None,
     intervals: Mapping[str, Mapping[str, list[float] | None]],
     inputs: Mapping[str, Any],
     provenance: Mapping[str, Any],
@@ -254,7 +261,13 @@ def build_record(
             f"summary names scorer {pooled.benchmark_revision}, "
             f"verified tree is {scorer_tree_sha256}"
         )
-    if divergence.horizon_length != protocol.divergence_horizon:
+    if (divergence is None) != (protocol.divergence_horizon is None):
+        raise ValueError(
+            "the divergence curve was "
+            + ("skipped" if divergence is None else "scored")
+            + " but the protocol says the opposite"
+        )
+    if divergence is not None and divergence.horizon_length != protocol.divergence_horizon:
         raise ValueError(
             f"divergence horizon {divergence.horizon_length}, "
             f"standard is {protocol.divergence_horizon}"
@@ -269,10 +282,12 @@ def build_record(
         }
         for feature in LOBBENCH_FEATURES
     }
-    divergence_fields = asdict(divergence)
-    for name in ("run_name", "stock", "period", "mode", "score_path",
-                 "benchmark_root", "benchmark_revision"):
-        divergence_fields.pop(name, None)
+    divergence_fields = None
+    if divergence is not None:
+        divergence_fields = asdict(divergence)
+        for name in ("run_name", "stock", "period", "mode", "score_path",
+                     "benchmark_root", "benchmark_revision"):
+            divergence_fields.pop(name, None)
     return {
         "format": STANDARD_EVAL_FORMAT,
         "run_name": run_name,
@@ -286,7 +301,7 @@ def build_record(
             "tree_sha256": scorer_tree_sha256,
             "benchmark_root": pooled.benchmark_root,
             "score_path": pooled.score_path,
-            "divergence_score_path": divergence.score_path,
+            "divergence_score_path": divergence.score_path if divergence is not None else None,
         },
         "inputs": dict(inputs),
         "provenance": dict(provenance),
