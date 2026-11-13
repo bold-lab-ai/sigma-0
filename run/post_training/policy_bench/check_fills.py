@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A one-share order at the back of the best queue: simulator against the real market (one GPU).
+"""A resting order at the back of the best queue: simulator against the real market (one GPU).
 
 What a passive (maker) policy earns depends on the queue at the best price:
 how fast the orders ahead go, how often the price moves away, and where the
@@ -38,8 +38,22 @@ level at p is still there after it (`level_stays`; markouts are also split by
 it). And the mid's move over the window (std, bps), the overall volatility,
 and the seconds the window's messages take (the simulator's clock).
 
+--order_size sets the order's shares (default 1). With more than one share the
+order can fill in parts: the counterfactual gives it, in order, the shares of
+every execution that would have reached it (through its price, or at its price
+behind the queue ahead), up to its size. Per path: the first fill (all the
+measures above), the full fill, the share of the order filled within the
+window, and markouts weighted by the shares of each fill.
+
+Level answers (real and none paths, all starts): every background execution in
+the window, with the shares at the best price of its side just before it, is
+classed as taking part of that level, exactly that level, or more (a deeper
+price or more shares than shown). With the mid's move after it in the
+aggressor's direction. This asks how a thin best level is taken, in the market
+and in the simulator without the order.
+
     python run/post_training/policy_bench/check_fills.py --config configs/policy_bench/v1.yaml \
-        --shard_root <mount> --out <file.json> [--sampler mask] [--n_episodes 500] [--window 512]
+        --shard_root <mount> --out <file.json> [--sampler mask] [--order_size 1] [--n_episodes 500] [--window 512]
 """
 
 from __future__ import annotations
@@ -69,15 +83,21 @@ MARKOUTS = [1, 16, 64, 128]
 SAMPLERS = {"mask": dict(max_rejections=0), "reject": dict(max_rejections=MAX_REJECTIONS),
             "keep": dict(max_rejections=MAX_REJECTIONS, keep_invalid=True)}
 KEEP_STRETCH = 2.0          # keep writes rows on about 75% of steps (lobbench/README.md); 1.6 was short (8363489)
-# A path: rows (m, 8) int64 [message, oid, evt, d, price, size, t_ns, best price of the quoted side
-# after the row], mids (n,) after each message, t0 (ns of the last history row).
+LEVEL_BUCKETS = [(1, 1), (2, 9), (10, 99), (100, 10**12)]     # shares at the best before an execution
+LEVEL_MOVES = [1, 16, 64]
+OUTCOMES = ("part", "exact", "beyond")
+# A path: rows (m, 12) int64 [message, oid, evt, d, price, size, t_ns, best price of the quoted side
+# after the row, ask price, ask shares, bid price, bid shares after the row], mids (n,) after each
+# message, t0 (ns of the last history row), top0 (ask price, ask shares, bid price, bid shares before
+# message 0).
 
 
 class QuoteOnce:
-    """Rests one share at the best price of the episode's side at k = 0, then nothing."""
+    """Rests `size` shares at the best price of the episode's side at k = 0, then nothing."""
 
-    def __init__(self, sides: dict) -> None:
+    def __init__(self, sides: dict, size: int = 1) -> None:
         self.sides = sides
+        self.size = size
 
     def reset(self, episode) -> None:
         self.side = self.sides[(episode.entry["message"], episode.start)]
@@ -85,7 +105,7 @@ class QuoteOnce:
     def step(self, obs) -> list:
         if obs.k:
             return []
-        return [LimitOrder(self.side, int(obs.l10[2] if self.side == BUY else obs.l10[0]), 1)]
+        return [LimitOrder(self.side, int(obs.l10[2] if self.side == BUY else obs.l10[0]), self.size)]
 
 
 class _Recording(SimMarket):
@@ -106,12 +126,15 @@ class _Recording(SimMarket):
         key = (ep.entry["message"], ep.start, self.variant)
         side = BID if self.sides[key[:2]] == BUY else ASK
         self.ahead[key] = [(o.oid, o.size) for o in r.book.queue(side, r.book.best(side))]
-        self.paths[key] = dict(t0=self._t_prev(r), rows=[], col=5 if side == BID else 3)
+        self.paths[key] = dict(t0=self._t_prev(r), rows=[], col=5 if side == BID else 3,
+                               top0=np.asarray(r.log.now[3:7], np.int64).copy())
 
     def _row(self, r, oid, evt, d, price, size, dt, t):
         super()._row(r, oid, evt, d, price, size, dt, t)
         p = self.paths[(r.ep.entry["message"], r.ep.start, self.variant)]
-        p["rows"].append((r.k, oid, evt, d, price, size, t, int(r.log.now[p["col"]])))
+        now = r.log.now
+        p["rows"].append((r.k, oid, evt, d, price, size, t, int(now[p["col"]]),
+                          int(now[3]), int(now[4]), int(now[5]), int(now[6])))
 
 
 def mid_or_nan(l10_row) -> float:
@@ -125,43 +148,100 @@ def real_path(day: DayFiles, start: int, side: int, n: int) -> dict:
     rows = rows[:bounds[-1][1]]
     k = np.repeat(np.arange(len(bounds)), [j - i for i, j in bounds])
     col = 5 if side == BUY else 3
-    best = np.asarray(day.l10[start + 1:start + 1 + len(rows), col], np.int64)     # l10[x]: book before row x
+    after = np.asarray(day.l10[start + 1:start + 1 + len(rows)], np.int64)     # l10[x]: book before row x
     t = rows[:, TS] * NS + rows[:, TNS]
     mids = np.array([mid_or_nan(day.l10[start + j]) for _, j in bounds])
     t0 = int(day.l10[start, 1]) * NS + int(day.l10[start, 2])
-    out = np.column_stack([k, rows[:, OID], rows[:, EVT], rows[:, DIR], rows[:, PRICE], rows[:, SIZE], t, best])
-    return dict(rows=out, mids=mids, t0=t0, real=True)
+    out = np.column_stack([k, rows[:, OID], rows[:, EVT], rows[:, DIR], rows[:, PRICE], rows[:, SIZE], t,
+                           after[:, col], after[:, 3:7]])
+    return dict(rows=out, mids=mids, t0=t0, top0=np.asarray(day.l10[start, 3:7], np.int64), real=True)
 
 
 def sim_path(market: _Recording, key: tuple, mids: np.ndarray) -> dict:
     """The recorded path on the axis of steps that wrote a row of a background message
     (the agent's own messages do not count; its fills come from background messages)."""
     p = market.paths[key]
-    rows = np.array(p["rows"], np.int64).reshape(-1, 8)
+    rows = np.array(p["rows"], np.int64).reshape(-1, 12)
     own = (rows[:, 1] >= AGENT_OID0) & (rows[:, 2] != 4)
     valid = np.unique(rows[~own, 0])
     rank = np.full(int(rows[:, 0].max()) + 2 if len(rows) else 1, -1, np.int64)
     rank[valid] = np.arange(len(valid))
     rows = rows[rank[rows[:, 0]] >= 0]
     rows[:, 0] = rank[rows[:, 0]]
-    return dict(rows=rows, mids=mids[1:][valid], t0=p["t0"])   # mids[m + 1]: after step m
+    return dict(rows=rows, mids=mids[1:][valid], t0=p["t0"], top0=p["top0"])   # mids[m + 1]: after step m
 
 
-def counterfactual(rows: np.ndarray, ahead: set, side: int, price: int) -> int | None:
+def counterfactual(rows: np.ndarray, ahead: set, side: int, price: int, size: int) -> list[tuple[int, int]]:
+    """Fills (message, shares) of an order of `size` at `price` behind `ahead`: in order, the shares of
+    every execution on its side through its price, or at its price of an order not queued ahead."""
     ours = 1 if side == BUY else 0
     ex = (rows[:, 2] == 4) & (rows[:, 3] == ours) & (rows[:, 1] < AGENT_OID0)
     through = rows[:, 4] < price if side == BUY else rows[:, 4] > price
     behind = (rows[:, 4] == price) & ~np.isin(rows[:, 1], list(ahead))
-    hit = np.flatnonzero(ex & (through | behind))
-    return int(rows[hit[0], 0]) if len(hit) else None
+    out, left = [], size
+    for i in np.flatnonzero(ex & (through | behind)):
+        take = min(left, int(rows[i, 5]))
+        out.append((int(rows[i, 0]), take))
+        left -= take
+        if not left:
+            break
+    return out
 
 
-def describe(path: dict, k: int | None, ahead: list, side: int, price: int, window: int) -> dict:
-    """How the episode went for the quote, with fill message k (None: not filled)."""
+def agent_fills(rows: np.ndarray) -> list[tuple[int, int]]:
+    hit = rows[(rows[:, 1] >= AGENT_OID0) & (rows[:, 2] == 4)]
+    return [(int(k), int(q)) for k, q in hit[:, [0, 5]]]
+
+
+def level_answers(path: dict, window: int) -> list[tuple]:
+    """(shares at the best of its side before it, outcome, move at LEVEL_MOVES) per background
+    execution message in the window. Outcome 0 part of the level, 1 exactly the level, 2 beyond it.
+    The move is the mid h messages after against the mid before, in the aggressor's direction, bps.
+    For paths without agent rows (real, none)."""
+    rows, mids = path["rows"], path["mids"]
+    b = np.searchsorted(rows[:, 0], np.arange(window + 1))
+    prev, out = np.asarray(path["top0"], np.int64), []
+    for m in range(window):
+        r = rows[b[m]:b[m + 1]]
+        if not len(r):
+            continue
+        ex = r[(r[:, 2] == 4) & (r[:, 1] < AGENT_OID0)]
+        if len(ex):
+            bid = int(ex[0, 3]) == 1                     # direction 1: the bid side is hit
+            p0, v0 = (prev[2], prev[3]) if bid else (prev[0], prev[1])
+            s = int(ex[:, 5].sum())
+            outcome = 2 if (ex[:, 4] != p0).any() or s > v0 else int(s == v0)
+            ok = 0 < prev[2] < prev[0] < 9_000_000_000
+            mid0 = (prev[0] + prev[2]) / 2
+            sign = -1 if bid else 1
+            moves = [sign * (mids[m + h] - mid0) / mid0 * 1e4 if ok and m + h < len(mids) else np.nan
+                     for h in LEVEL_MOVES]
+            out.append((int(v0), outcome, *moves))
+        prev = r[-1, 8:12]
+    return out
+
+
+def level_stats(answers: list[tuple]) -> dict:
+    a = np.array(answers, np.float64).reshape(-1, 2 + len(LEVEL_MOVES))
+    out = {}
+    for lo, hi in LEVEL_BUCKETS:
+        x = a[(a[:, 0] >= lo) & (a[:, 0] <= hi)]
+        d = dict(n=len(x), **{o: float((x[:, 1] == i).mean()) if len(x) else None for i, o in enumerate(OUTCOMES)})
+        for j, h in enumerate(LEVEL_MOVES):
+            d[f"move_{h}"] = _mean_se(x[:, 2 + j])
+            for i, o in enumerate(OUTCOMES):
+                d[f"move_{h}_{o}"] = _mean_se(x[x[:, 1] == i, 2 + j])
+        out[f"{lo}-{hi}" if hi < 10**12 else f"{lo}+"] = d
+    return out
+
+
+def describe(path: dict, fills: list, ahead: list, side: int, price: int, size: int, window: int) -> dict:
+    """How the episode went for the quote, with its fills [(message, shares)] (first fill k)."""
     rows, mids = path["rows"], path["mids"]
     ours = 1 if side == BUY else 0
     ids = list({o for o, _ in ahead})
-    k = k if k is not None and k < window else None
+    fills = [(k, q) for k, q in fills if k < window]
+    k = fills[0][0] if fills else None
     end = window if k is None else k
     pre = rows[(rows[:, 0] < end) & (rows[:, 1] < AGENT_OID0)]
     mine = np.isin(pre[:, 1], ids) & (pre[:, 3] == ours) & (pre[:, 4] == price)
@@ -175,6 +255,15 @@ def describe(path: dict, k: int | None, ahead: list, side: int, price: int, wind
              window_s=float((rows[rows[:, 0] < window, 6].max() - path["t0"]) / NS) if (rows[:, 0] < window).any()
              else float("nan"),
              move_bps=float(side * (mids[last] - mids[0]) / mids[0] * 1e4) if ok else float("nan"))
+    cum = np.cumsum([q for _, q in fills]) if fills else np.zeros(0)
+    d["filled_frac"] = float(cum[-1] / size) if fills else 0.0
+    d["k_full"] = int(fills[int(np.searchsorted(cum, size))][0]) if fills and cum[-1] >= size else None
+    w = {}
+    for h in MARKOUTS:
+        v = [(q, side * (mids[j + h] - price) / price * 1e4) for j, q in fills
+             if j + h < len(mids) and np.isfinite(mids[j + h])]
+        w[h] = float(sum(q * x for q, x in v) / sum(q for q, _ in v)) if v else None
+    d["markouts_w"] = w
     if k is not None:
         at = rows[rows[:, 0] == k]
         exe = at[(at[:, 2] == 4) & (at[:, 3] == ours)]
@@ -215,6 +304,12 @@ def stats(ds: list[dict], window: int) -> dict:
                fill_msg_size_one=float(np.mean([d["fill_msg_size"] == 1 for d in f])) if f else None,
                fill_msg_size_median=float(np.median([d["fill_msg_size"] for d in f])) if f else None,
                level_stays=float(np.mean([d["level_stays"] for d in f])) if f else None)
+    kf = np.array([np.inf if d["k_full"] is None else d["k_full"] for d in ds], np.float64)
+    out.update(filled_full=float((kf < window).mean()),
+               **{f"filled_full_{w}": float((kf < w).mean()) for w in WITHIN},
+               fill_full_k_median=float(np.median(kf[kf < window])) if (kf < window).any() else None,
+               filled_frac=float(np.mean([d["filled_frac"] for d in ds])),
+               **{f"markout_w_{h}": _mean_se([d["markouts_w"][h] for d in f]) for h in MARKOUTS})
     for h in MARKOUTS:
         out[f"markout_{h}"] = _mean_se([d["markouts"][h] for d in f])
         for stays in (True, False):
@@ -232,10 +327,12 @@ def main():
     p.add_argument("--config", required=True)
     p.add_argument("--shard_root", required=True)
     p.add_argument("--sampler", choices=sorted(SAMPLERS), default="mask")
+    p.add_argument("--order_size", type=int, default=1)
     p.add_argument("--n_episodes", type=int, default=500)
     p.add_argument("--window", type=int, default=512)
     p.add_argument("--seed", type=int, default=20261113)
     p.add_argument("--out", required=True)
+    p.add_argument("--real_only", action="store_true", help="the real path and its level answers only (CPU)")
     a = p.parse_args()
 
     cfg = yaml.safe_load(open(a.config))
@@ -247,54 +344,66 @@ def main():
     eps = [Episode(by_key[(h["month"], h["message"])], h["start"], h["seed"]) for h in hist]
     sides = {(ep.entry["message"], ep.start): BUY if i % 2 == 0 else SELL for i, ep in enumerate(eps)}
 
+    paths = ("real",) if a.real_only else ("real", "agent", "none")
     t0 = time.time()
-    market = _Recording(load_newtok(cfg["simulator"], torch.device("cuda")), a.shard_root, cfg["add_dir"],
-                        cfg["batch"], history=cfg["history"], n_messages=n_sim, latency=0, inventory_cap=10**9,
-                        **SAMPLERS[a.sampler])
-    market.sides = sides
-    market.variant = "agent"
-    tr_agent = rollout(QuoteOnce(sides), None, market, eps, every=n_sim)
-    market.variant = "none"
-    tr_none = rollout(NoTrade(), None, market, eps, every=n_sim)
+    if a.real_only:
+        tr_agent = tr_none = [None] * len(eps)
+    else:
+        market = _Recording(load_newtok(cfg["simulator"], torch.device("cuda")), a.shard_root, cfg["add_dir"],
+                            cfg["batch"], history=cfg["history"], n_messages=n_sim, latency=0,
+                            inventory_cap=10**9, **SAMPLERS[a.sampler])
+        market.sides = sides
+        market.variant = "agent"
+        tr_agent = rollout(QuoteOnce(sides, a.order_size), None, market, eps, every=n_sim)
+        market.variant = "none"
+        tr_none = rollout(NoTrade(), None, market, eps, every=n_sim)
     seconds = time.time() - t0
 
-    res = dict(config=a.config, sampler=a.sampler, n_episodes=len(eps), window=a.window, seed=a.seed,
-               n_sim_steps=n_sim, seconds=seconds, torch=torch.__version__, sides={})
+    res = dict(config=a.config, sampler=a.sampler, order_size=a.order_size, n_episodes=len(eps),
+               window=a.window, seed=a.seed, n_sim_steps=n_sim, seconds=seconds, torch=torch.__version__,
+               real_only=a.real_only, sides={})
     acc = {s: dict(real=[], agent=[], none=[], same_queue=0, refused=0, short=0, gen={}) for s in ("bid", "ask")}
+    levels = {"real": [], "none": []}
     for ep, ta, tn in zip(eps, tr_agent, tr_none):
         key = (ep.entry["message"], ep.start)
         side = sides[key]
         v = acc["bid" if side == BUY else "ask"]
-        for g, c in ta.gen.items():
-            v["gen"][g] = v["gen"].get(g, 0) + int(c)
-        if ta.refused:
-            v["refused"] += 1
-            continue
+        if ta is not None:
+            for g, c in ta.gen.items():
+                v["gen"][g] = v["gen"].get(g, 0) + int(c)
+            if ta.refused:
+                v["refused"] += 1
+                continue
         day = DayFiles.open(a.shard_root, ep.entry)
         bk = day.book_before(ep.start)
         bside = BID if side == BUY else ASK
         price = bk.best(bside)
         real_q = [(o.oid, o.size) for o in bk.queue(bside, price)]
-        v["same_queue"] += int(real_q == market.ahead[key + ("agent",)] == market.ahead[key + ("none",)])
         ahead = {o for o, _ in real_q}
         rp = real_path(day, ep.start, side, n)
+        v["real"].append(describe(rp, counterfactual(rp["rows"], ahead, side, price, a.order_size), real_q, side,
+                                  price, a.order_size, a.window))
+        levels["real"] += level_answers(rp, a.window)
+        if ta is None:
+            continue
+        v["same_queue"] += int(real_q == market.ahead[key + ("agent",)] == market.ahead[key + ("none",)])
         pa = sim_path(market, key + ("agent",), ta.mid)
         pn = sim_path(market, key + ("none",), tn.mid)
         if min(len(pa["mids"]), len(pn["mids"])) < n:
             v["short"] += 1                                  # keep: fewer rows than the window needs
-        hit = pa["rows"][(pa["rows"][:, 1] >= AGENT_OID0) & (pa["rows"][:, 2] == 4)]
-        k_agent = int(hit[0, 0]) if len(hit) else None
-        v["real"].append(describe(rp, counterfactual(rp["rows"], ahead, side, price), real_q, side, price, a.window))
-        v["agent"].append(describe(pa, k_agent, real_q, side, price, a.window))
-        v["none"].append(describe(pn, counterfactual(pn["rows"], ahead, side, price), real_q, side, price, a.window))
+        v["agent"].append(describe(pa, agent_fills(pa["rows"]), real_q, side, price, a.order_size, a.window))
+        v["none"].append(describe(pn, counterfactual(pn["rows"], ahead, side, price, a.order_size), real_q, side,
+                                  price, a.order_size, a.window))
+        levels["none"] += level_answers(pn, a.window)
     for s, v in acc.items():
         m = len(v["real"])
         res["sides"][s] = dict(episodes=m, refused=v["refused"], short=v["short"],
                                same_queue=v["same_queue"] / max(m, 1),
                                ahead_shares_median=float(np.median([d["ahead"] for d in v["real"]])) if m else None,
-                               gen=v["gen"], **{k: stats(v[k], a.window) for k in ("real", "agent", "none")})
+                               gen=v["gen"], **{k: stats(v[k], a.window) for k in paths})
+    res["level_answers"] = {k: level_stats(levels[k]) for k in levels if levels[k]}
     json.dump(res, open(a.out, "w"), indent=1)
-    json.dump({s: {k: acc[s][k] for k in ("real", "agent", "none")} for s in acc},
+    json.dump(dict(**{s: {k: acc[s][k] for k in paths} for s in acc}, levels=levels),
               open(a.out.replace(".json", "_episodes.json"), "w"))
 
     def r2(x):
@@ -302,7 +411,7 @@ def main():
     for s, v in res["sides"].items():
         print(f"== {a.sampler} {s}: {v['episodes']} episodes, refused {v['refused']}, short {v['short']}, "
               f"same queue {v['same_queue']:.3f}, ahead median {v['ahead_shares_median']}")
-        for k in ("real", "none", "agent"):
+        for k in [k for k in ("real", "none", "agent") if k in paths]:
             x = v[k]
             print(f"  {k:5s} filled {x['filled']:.3f} " + " ".join(f"<{w} {x[f'filled_{w}']:.3f}" for w in WITHIN)
                   + f" k_med {x['fill_k_median']} s_med {r2(x['fill_s_median'])}"
@@ -310,6 +419,15 @@ def main():
                   + f" away {x['moved_away']:.3f} stays {r2(x['level_stays'])} size {x['fill_msg_size_median']}"
                   + f" move_std {x['move_std_bps']:.2f} window_s {x['window_s_median']:.1f} mo "
                   + " ".join(f"h{h} {r2(x[f'markout_{h}']['mean'])}" for h in MARKOUTS))
+            print(f"        full {x['filled_full']:.3f} <64 {x['filled_full_64']:.3f} k_full_med "
+                  f"{x['fill_full_k_median']} frac {x['filled_frac']:.3f} mo_w "
+                  + " ".join(f"h{h} {r2(x[f'markout_w_{h}']['mean'])}" for h in MARKOUTS))
+    for k, lv in res["level_answers"].items():
+        for b, d in lv.items():
+            print(f"levels {k:4s} {b:>6s}: n {d['n']} " + " ".join(f"{o} {r2(d[o])}" for o in OUTCOMES)
+                  + " move " + " ".join(f"h{h} {r2(d[f'move_{h}']['mean'])}" for h in LEVEL_MOVES)
+                  + " | exact h16 " + str(r2(d["move_16_exact"]["mean"])) + " beyond h16 "
+                  + str(r2(d["move_16_beyond"]["mean"])))
     print(f"{seconds:.0f} s")
 
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-# A one-share order at the back of the best queue, simulator against real (one GPU). See check_fills.py.
+# A resting order at the back of the best queue, simulator against real (one GPU; --real_only needs none). See check_fills.py.
 # Pass the output and options with the arguments of check_fills.py.
 #
 #   PYTHON=<env with torch>/bin/python sbatch --nodes=1 --output=<dir>/%x_%j.out \
