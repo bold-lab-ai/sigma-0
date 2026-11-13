@@ -136,6 +136,23 @@ def test_replay_latency_and_inventory_cap(tmp_path):
     assert len(tr.fills) == 0 and tr.refused == 2
 
 
+def test_replay_latency_in_nanoseconds(tmp_path):
+    # rows 2-5 at +1,000, +2,000, +3,000, +4,000 ns; the decision at k = 0 sees row 1, at +0 ns
+    entry = write_day(tmp_path, ns=(0, 0, 1_000, 2_000, 3_000, 4_000))
+
+    def fill_k(latency_ns):
+        m = _market(tmp_path, MidFill(), n_messages=4, latency_ns=latency_ns)
+        [tr] = rollout(SignRule(0, size=1), _Signal(-1.0), m, [Episode(entry, start=2)], every=64)
+        return tr.fills[:, 0].tolist()
+    assert fill_k(0) == [0]              # before row 2, as latency 0
+    assert fill_k(1_000) == [0]          # due at row 2's time: before row 2
+    assert fill_k(1_500) == [1]          # after row 2, before row 3
+    assert fill_k(10_000) == []          # never due within the episode
+    m = _market(tmp_path, MidFill(), n_messages=4, latency=0)
+    [tr] = rollout(SignRule(0, size=1), _Signal(-1.0), m, [Episode(entry, start=2)], every=64)
+    assert tr.fills[:, 0].tolist() == [0]
+
+
 def test_replay_refuses_limit_orders_and_no_trade_is_flat(tmp_path):
     entry = write_day(tmp_path)
     m = _market(tmp_path, BookFill(), n_messages=4)

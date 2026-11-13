@@ -8,10 +8,15 @@ episode stays within newtok_a_r1's longest training window (4,096 messages).
 A row moves one background message at a time:
 
 1. Agent orders that are due become messages and are fed as forced tokens, so
-   the simulator sees them. A limit order rests at the back of its queue
+   the simulator sees them. An order is due `latency` background messages
+   after its decision, or, with `latency_ns`, at the decision's time (the
+   time of the last row) plus latency_ns: a background message drawn with a
+   later time is then discarded (the cache cut back to its start), the order
+   is fed at its due time, and the background message is drawn again with the
+   order in its context. A limit order rests at the back of its queue
    (event 1); a cancel removes the agent's order (event 3); a market order
    takes the opposite side level by level, front of queue first (event 4).
-   Each comes 1 ns after the previous message. A limit order that would cross,
+   Under `latency` each comes 1 ns after the previous message. A limit order that would cross,
    or is not a whole number of cents, is refused, and so is any agent order
    that would leave a side of the book empty (see sampling.empties_side).
 2. A background message is drawn whole and kept only if sampling.finish
@@ -79,7 +84,7 @@ class _Row:
     position: int = 0
     cash: float = 0.0
     refused: int = 0
-    pending: list = field(default_factory=list)       # (active at k, order)
+    pending: list = field(default_factory=list)       # (due at k, due at ns, order); one of the two is None
     resting: dict = field(default_factory=dict)       # agent oid -> side
     fills: list = field(default_factory=list)
     new: list = field(default_factory=list)
@@ -111,11 +116,14 @@ class SimMarket:
     def __init__(self, model, shard_root: str, add_dir: str, batch: int, history: int = 3968,
                  n_messages: int = 1024, latency: int = 1, inventory_cap: int = 1000,
                  dtype: torch.dtype = torch.bfloat16, max_rejections: int = MAX_REJECTIONS,
-                 full_keys: bool = False, keep_invalid: bool = False) -> None:
+                 full_keys: bool = False, keep_invalid: bool = False, latency_ns: int | None = None) -> None:
         self.shard_root, self.add_dir, self.batch = shard_root, add_dir, batch
         self.max_rejections = max_rejections
         self.keep_invalid = keep_invalid       # nano-sigma's LOB-Bench rule, for comparison only
         self.history, self.n_messages, self.latency, self.cap = history, n_messages, latency, inventory_cap
+        self.latency_ns = latency_ns           # None: `latency` messages; else nanoseconds after the decision
+        if latency_ns is not None and latency_ns < 0:
+            raise ValueError(f"latency_ns {latency_ns} < 0")
         self.context = CONTEXT_MESSAGES - n_messages - AGENT_MARGIN
         self.sim = BatchKVSimulator(model, batch, CONTEXT_MESSAGES * MAX_TOKENS_PER_MESSAGE + 8192, dtype,
                                     full_keys)
@@ -193,7 +201,10 @@ class SimMarket:
         for o in orders:
             if not isinstance(o, self.supports):
                 raise TypeError(f"not an order: {o!r}")
-            r.pending.append((r.k + self.latency, o))
+            if self.latency_ns is None:
+                r.pending.append((r.k + self.latency, None, o))
+            else:
+                r.pending.append((None, self._t_prev(r) + self.latency_ns, o))
 
     def trace(self, i: int) -> Trace:
         r = self.rows[i]
@@ -261,6 +272,8 @@ class SimMarket:
         st.push(tok)
         while st.done():
             m, reason = finish(st, r.book, self._mid(r), r.end)
+            if m is not None and self._preempt(i, r, m.time):
+                return
             if m is not None:
                 self._apply_background(r, m)
                 r.inp, r.bvec, r.between = tok, self._bvec(r), True
@@ -356,15 +369,44 @@ class SimMarket:
         r.fills.append(f)
         r.new.append(f)
 
-    def _activate(self, r: _Row) -> None:
-        due = [o for at, o in r.pending if at <= r.k]
-        r.pending = [(at, o) for at, o in r.pending if at > r.k]
-        for o in due:
-            msg = self._agent_message(r, o)
-            if msg is None:
+    def _pop_due(self, r: _Row, t: int) -> list:
+        """[(due ns or None, order), ...] of the orders due at message r.k or by time t, in order."""
+        def due(at, ns):
+            return at <= r.k if ns is None else ns <= t
+        out = [(ns, o) for at, ns, o in r.pending if due(at, ns)]
+        r.pending = [(at, ns, o) for at, ns, o in r.pending if not due(at, ns)]
+        return out
+
+    def _send(self, r: _Row, due: list) -> int:
+        """Apply due orders as agent messages; the number accepted."""
+        sent = 0
+        for ns, o in due:
+            t = None if ns is None else max(ns, self._t_prev(r) + 1)
+            if self._agent_message(r, o, t) is None:
                 r.refused += 1
                 continue
             r.gen["agent_messages"] += 1
+            sent += 1
+        return sent
+
+    def _activate(self, r: _Row) -> None:
+        self._send(r, self._pop_due(r, self._t_prev(r)))
+
+    def _preempt(self, i: int, r: _Row, t_msg: int) -> bool:
+        """Under latency_ns: orders due by t_msg, the time of the background message just
+        drawn, reach the market first. The draw is discarded and the orders are fed;
+        the background message is drawn again after them. False if none is due or all
+        are refused (the draw then stands)."""
+        if self.latency_ns is None or not any(ns is not None and ns <= t_msg for _, ns, _ in r.pending):
+            return False
+        if not self._send(r, self._pop_due(r, t_msg)):
+            return False
+        r.gen["preempted"] += 1
+        self.sim.truncate(i, r.n_start)
+        r.forced, r.after = r.agent.pop(0)
+        r.state = None
+        r.inp = r.forced.pop(0)
+        return True
 
     def _exposure(self, r: _Row, side: int) -> int:
         """Position if every resting agent order on `side` (BUY or SELL) filled."""
@@ -372,10 +414,15 @@ class SimMarket:
                    for o in r.book.queue(BID if side == BUY else ASK, p) if o.owner == AGENT)
         return r.position + side * rest
 
-    def _agent_message(self, r: _Row, o):
-        """Apply an agent order to the book and queue its message. None if refused."""
+    def _agent_message(self, r: _Row, o, t: int | None = None):
+        """Apply an agent order to the book and queue its message, at time t (default 1 ns
+        after the previous message). None if refused."""
         mid = self._mid(r)
-        t = self._t_prev(r) + 1                        # 1 ns after the previous message
+        t_prev = self._t_prev(r)
+        t = t_prev + 1 if t is None else t
+        dt = t - t_prev
+        if dt < 0:
+            raise ValueError(f"agent message at {t} before the previous message at {t_prev}")
         if isinstance(o, Cancel):
             if o.oid not in r.resting or not r.book.has(o.oid):
                 return None
@@ -384,12 +431,12 @@ class SimMarket:
                 return None
             slot = r.book.slot_of(o.oid)
             rem = r.book.queue(side, price)[slot].size
-            m = Message(3, 1 if side == BID else 0, 0, 1, t // NS, t % NS, ((price, min(rem, MAX_SIZE)),),
-                        min(slot, LAST_SLOT))
+            m = Message(3, 1 if side == BID else 0, dt // NS, dt % NS, t // NS, t % NS,
+                        ((price, min(rem, MAX_SIZE)),), min(slot, LAST_SLOT))
             toks = encode(m, mid)
             r.book.remove_at(side, price, slot)
             r.resting.pop(o.oid)
-            self._row(r, o.oid, 3, m.d, price, rem, 1, t)
+            self._row(r, o.oid, 3, m.d, price, rem, dt, t)
         elif isinstance(o, LimitOrder):
             side = BID if o.side == BUY else ASK
             opp = r.book.best(-side)
@@ -398,11 +445,11 @@ class SimMarket:
                     or abs(self._exposure(r, o.side) + o.side * o.size) > self.cap:
                 return None
             oid, r.next_agent = r.next_agent, r.next_agent + 1
-            m = Message(1, 1 if side == BID else 0, 0, 1, t // NS, t % NS, ((o.price, o.size),))
+            m = Message(1, 1 if side == BID else 0, dt // NS, dt % NS, t // NS, t % NS, ((o.price, o.size),))
             toks = encode(m, mid)
             r.book.add(side, o.price, oid, o.size, AGENT)
             r.resting[oid] = o.side
-            self._row(r, oid, 1, m.d, o.price, o.size, 1, t)
+            self._row(r, oid, 1, m.d, o.price, o.size, dt, t)
         else:
             side = ASK if o.side == BUY else BID          # the side the order takes from
             if abs(r.position + o.side * o.size) > self.cap or side_volume(r.book, side) <= o.size:
@@ -414,7 +461,7 @@ class SimMarket:
                 left -= take
                 if left == 0:
                     break
-            m = Message(4, d, 0, 1, t // NS, t % NS, tuple(levels))
+            m = Message(4, d, dt // NS, dt % NS, t // NS, t % NS, tuple(levels))
             toks = encode(m, mid)
             mid_now, first = mid_of(r.log.now[3:]), True
             for p, q in levels:
@@ -427,7 +474,7 @@ class SimMarket:
                     r.book.reduce_at(side, p, 0, take)
                     if own and not r.book.has(rest.oid):
                         r.resting.pop(rest.oid, None)
-                    self._row(r, rest.oid, 4, d, p, take, 1 if first else 0, t)
+                    self._row(r, rest.oid, 4, d, p, take, dt if first else 0, t)
                     self._agent_fill(r, Fill(r.k, o.side, float(p), take, False, mid_now))
                     first, q = False, q - take
         r.agent.append((list(toks), self._bvec(r)))

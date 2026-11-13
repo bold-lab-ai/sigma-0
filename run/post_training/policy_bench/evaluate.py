@@ -52,6 +52,9 @@ def main():
     p.add_argument("--limit", type=int, default=0, help="first N episodes only (smoke)")
     p.add_argument("--max_rejections", type=int, default=None,
                    help="SimMarket draws before the masks (default: the config's, else 32; 0: every draw masked)")
+    p.add_argument("--latency_ns", type=int, default=None,
+                   help="orders reach the market this many ns after the decision (default: the config's "
+                        "latency_ns; if neither is set, the config's latency in messages)")
     p.add_argument("--out", required=True)
     a = p.parse_args()
 
@@ -63,8 +66,9 @@ def main():
     policy = load_policy(a.policy, json.loads(a.kwargs))
     dev = torch.device("cuda")
     signal = Signal(cfg["signal"], dev)
+    latency_ns = a.latency_ns if a.latency_ns is not None else cfg.get("latency_ns")
     common = dict(history=cfg["history"], n_messages=cfg["n_messages"], latency=cfg["latency"],
-                  inventory_cap=cfg["inventory_cap"])
+                  inventory_cap=cfg["inventory_cap"], latency_ns=latency_ns)
     max_rej = a.max_rejections if a.max_rejections is not None else cfg.get("max_rejections", MAX_REJECTIONS)
     if a.market == "sim":
         market = SimMarket(load_newtok(cfg["simulator"], dev), a.shard_root, cfg["add_dir"], cfg["batch"],
@@ -75,7 +79,7 @@ def main():
     traces = rollout(policy, signal, market, eps, every=cfg["every"])
     cost = MakerTaker(rebate=cfg["maker_rebate"], fee=cfg["taker_fee"])
     res = dict(config=cfg, policy=a.policy, kwargs=json.loads(a.kwargs), market=a.market,
-               max_rejections=max_rej if a.market == "sim" else None, episodes=len(eps),
+               max_rejections=max_rej if a.market == "sim" else None, latency_ns=latency_ns, episodes=len(eps),
                seconds=time.time() - t0, torch=torch.__version__,
                scores={name: score(traces, TERMINALS[name](), cost) for name in cfg["terminals"]})
     trace_io.save(a.out.replace(".json", "_traces.npz"), traces)

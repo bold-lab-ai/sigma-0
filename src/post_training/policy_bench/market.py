@@ -9,7 +9,9 @@ instead of getting a guessed fill. The fill model is a choice:
     MidFill    the whole order at the mid (nano-sigma's PnL bench, variant A)
     BookFill   the opposite side from the best price, level by level (taker)
 
-Orders become active `latency` background messages after they are submitted.
+Orders become active `latency` background messages after they are submitted,
+or, with `latency_ns`, before the first real row whose time is at least the
+decision's time (the last row's) plus latency_ns.
 Episodes of one day in increasing start order reuse the day's book: the next
 start state is replayed forward from where the last episode ended, not rebuilt
 from a snapshot. The book is the real one either way (agent orders never touch
@@ -23,6 +25,7 @@ from __future__ import annotations
 import numpy as np
 
 from post_training.policy_bench.book import ASK, BID, Book
+from post_training.policy_bench.codec import NS
 from post_training.policy_bench.history import MSG_COLS, open_day, start_state
 from post_training.policy_bench.signal import price_rel_clip, processed_row
 from post_training.policy_bench.trace import Trace
@@ -64,9 +67,13 @@ class ReplayMarket:
     batch = 1
 
     def __init__(self, shard_root: str, add_dir: str, fill, history: int = 3968,
-                 n_messages: int = 1024, latency: int = 1, inventory_cap: int = 1000) -> None:
+                 n_messages: int = 1024, latency: int = 1, inventory_cap: int = 1000,
+                 latency_ns: int | None = None) -> None:
         self.shard_root, self.add_dir, self.fill_model = shard_root, add_dir, fill
         self.history, self.n_messages, self.latency, self.cap = history, n_messages, latency, inventory_cap
+        self.latency_ns = latency_ns           # None: `latency` messages; else nanoseconds after the decision
+        if latency_ns is not None and latency_ns < 0:
+            raise ValueError(f"latency_ns {latency_ns} < 0")
 
     def reset(self, eps: list[Episode]) -> None:
         if len(eps) != 1:
@@ -92,7 +99,7 @@ class ReplayMarket:
         self._rows = day.replay(self.book, ep.start, ep.start + self.n_messages)
         self._raw = np.asarray(day.messages[ep.start:ep.start + self.n_messages])
         self.k, self.position, self.cash, self.refused = 0, 0, 0.0, 0
-        self._pending: list[tuple[int, MarketOrder]] = []
+        self._pending: list[tuple[int | None, int | None, MarketOrder]] = []   # due at k, due at ns
         self._fills: list[Fill] = []
         self._new: list[Fill] = []
         self._mid = [mid_of(self.rowlog.now[3:])]
@@ -120,7 +127,11 @@ class ReplayMarket:
         for o in orders:
             if not isinstance(o, self.supports):
                 raise NotImplementedError(f"ReplayMarket takes market orders only, got {type(o).__name__}")
-            self._pending.append((self.k + self.latency, o))
+            if self.latency_ns is None:
+                self._pending.append((self.k + self.latency, None, o))
+            else:
+                t = self.rowlog.rows(1)[0]
+                self._pending.append((None, int(t[8]) * NS + int(t[9]) + self.latency_ns, o))
         self._activate()                       # latency 0: before the next message
 
     def advance(self) -> list[Fill]:
@@ -153,8 +164,15 @@ class ReplayMarket:
 
     def _activate(self) -> list[Fill]:
         out: list[Fill] = []
-        due = [o for at, o in self._pending if at <= self.k]
-        self._pending = [(at, o) for at, o in self._pending if at > self.k]
+        t_next = None                          # time of the next real row
+        if self.k < self.n_messages:
+            f = self._raw[self.k]
+            t_next = int(f[8]) * NS + int(f[9])
+
+        def is_due(at, ns):
+            return at <= self.k if ns is None else t_next is not None and ns <= t_next
+        due = [o for at, ns, o in self._pending if is_due(at, ns)]
+        self._pending = [(at, ns, o) for at, ns, o in self._pending if not is_due(at, ns)]
         for o in due:
             if abs(self.position + o.side * o.size) > self.cap:
                 self.refused += 1

@@ -12,6 +12,8 @@ history: 3968            # real rows before an episode (the signal's context)
 n_messages: 1024         # background messages per episode
 every: 64                # background messages between decisions
 latency: 1               # background messages before an order is active
+# latency_ns: unset       # if set, orders arrive this many ns after the decision instead
+max_rejections: 0        # every background draw masked to legal tokens (results/fills/v2, lobbench)
 inventory_cap: 1000      # shares
 order_size: 100          # shares, the baselines' order size
 maker_rebate: 0.002      # $ per share
