@@ -54,6 +54,15 @@ side at the level's price (a maker that was really filled, no counterfactual).
 This asks how a thin best level is taken, and what its last shares earn, in the
 market and in the simulator without the order.
 
+Order fates (real and none paths): every background order that joins the queue
+at the best price of its side (an add at the best price) in the first
+--window - FATE_HORIZON messages, followed for FATE_HORIZON messages: whether
+and when it is first executed, cancelled before any execution, and the markouts
+of its first execution. Real orders are cancelled by their owners, so this is
+not the agent's never-cancelled order, but it needs no counterfactual: it
+compares the simulator's makers with the market's. --skip_agent runs the
+simulator without the order only.
+
     python run/post_training/policy_bench/check_fills.py --config configs/policy_bench/v1.yaml \
         --shard_root <mount> --out <file.json> [--sampler mask] [--order_size 1] [--n_episodes 500] [--window 512]
 """
@@ -88,6 +97,9 @@ KEEP_STRETCH = 2.0          # keep writes rows on about 75% of steps (lobbench/R
 LEVEL_BUCKETS = [(1, 1), (2, 9), (10, 99), (100, 10**12)]     # shares at the best before an execution
 LEVEL_MOVES = [1, 16, 64]
 OUTCOMES = ("part", "exact", "beyond")
+FATE_HORIZON = 256
+FATE_WITHIN = [16, 64, 256]
+FATE_SIZES = [(1, 99), (100, 100), (101, 10**12)]
 # A path: rows (m, 12) int64 [message, oid, evt, d, price, size, t_ns, best price of the quoted side
 # after the row, ask price, ask shares, bid price, bid shares after the row], mids (n,) after each
 # message, t0 (ns of the last history row), top0 (ask price, ask shares, bid price, bid shares before
@@ -227,6 +239,53 @@ def level_answers(path: dict, window: int) -> list[tuple]:
     return out
 
 
+def order_fates(path: dict, window: int) -> list[tuple]:
+    """(size, first execution after (messages, -1 none), cancelled before any execution (0/1), markout
+    of the first execution at MARKOUTS) per background order joining the best queue in messages
+    [0, window - FATE_HORIZON), followed FATE_HORIZON messages. For paths without agent rows."""
+    rows, mids = path["rows"], path["mids"]
+    b = np.searchsorted(rows[:, 0], np.arange(window + 1))
+    prev, live, out = np.asarray(path["top0"], np.int64), {}, []
+    for m in range(window):
+        r = rows[b[m]:b[m + 1]]
+        for o in [o for o, f in live.items() if m - f["k0"] >= FATE_HORIZON]:
+            out.append(live.pop(o)["rec"])
+        for row in r:
+            oid, evt, d, price, size = (int(x) for x in row[1:6])
+            if evt == 1:
+                best = prev[2] if d == 1 else prev[0]
+                if m < window - FATE_HORIZON and price == best:
+                    live[oid] = dict(k0=m, rec=[size, -1, 0] + [np.nan] * len(MARKOUTS))
+            elif oid in live:
+                f = live[oid]
+                if evt == 4 and f["rec"][1] < 0:
+                    f["rec"][1] = m - f["k0"]
+                    sgn = 1 if d == 1 else -1                 # a bid that is executed bought
+                    f["rec"][3:] = [sgn * (mids[m + h] - price) / price * 1e4 if m + h < len(mids) else np.nan
+                                    for h in MARKOUTS]
+                elif evt == 3 and f["rec"][1] < 0:
+                    f["rec"][2] = 1
+                    out.append(live.pop(oid)["rec"])
+        if len(r):
+            prev = r[-1, 8:12]
+    return out + [f["rec"] for f in live.values()]
+
+
+def fate_stats(fates: list) -> dict:
+    a = np.array(fates, np.float64).reshape(-1, 3 + len(MARKOUTS))
+    out = {}
+    for lo, hi in [(1, 10**12)] + FATE_SIZES:
+        x = a[(a[:, 0] >= lo) & (a[:, 0] <= hi)]
+        hit = x[x[:, 1] >= 0]
+        d = dict(n=len(x), **{f"executed_{w}": float(((x[:, 1] >= 0) & (x[:, 1] < w)).mean()) if len(x) else None
+                              for w in FATE_WITHIN},
+                 deleted_first=float(x[:, 2].mean()) if len(x) else None,
+                 first_exec_median=float(np.median(hit[:, 1])) if len(hit) else None,
+                 **{f"markout_{h}": _mean_se(hit[:, 3 + j]) for j, h in enumerate(MARKOUTS)})
+        out["all" if hi == 10**12 and lo == 1 else (f"{lo}" if lo == hi else f"{lo}-{hi}" if hi < 10**12 else f"{lo}+")] = d
+    return out
+
+
 def level_stats(answers: list[tuple]) -> dict:
     nm = len(LEVEL_MOVES)
     a = np.array(answers, np.float64).reshape(-1, 3 + nm + len(MARKOUTS))
@@ -344,6 +403,7 @@ def main():
     p.add_argument("--seed", type=int, default=20261113)
     p.add_argument("--out", required=True)
     p.add_argument("--real_only", action="store_true", help="the real path and its level answers only (CPU)")
+    p.add_argument("--skip_agent", action="store_true", help="the simulator without the order only")
     a = p.parse_args()
 
     cfg = yaml.safe_load(open(a.config))
@@ -355,7 +415,7 @@ def main():
     eps = [Episode(by_key[(h["month"], h["message"])], h["start"], h["seed"]) for h in hist]
     sides = {(ep.entry["message"], ep.start): BUY if i % 2 == 0 else SELL for i, ep in enumerate(eps)}
 
-    paths = ("real",) if a.real_only else ("real", "agent", "none")
+    paths = ("real",) if a.real_only else ("real", "none") if a.skip_agent else ("real", "agent", "none")
     t0 = time.time()
     if a.real_only:
         tr_agent = tr_none = [None] * len(eps)
@@ -365,24 +425,26 @@ def main():
                             inventory_cap=10**9, **SAMPLERS[a.sampler])
         market.sides = sides
         market.variant = "agent"
-        tr_agent = rollout(QuoteOnce(sides, a.order_size), None, market, eps, every=n_sim)
+        tr_agent = [None] * len(eps) if a.skip_agent else rollout(QuoteOnce(sides, a.order_size), None, market,
+                                                                   eps, every=n_sim)
         market.variant = "none"
         tr_none = rollout(NoTrade(), None, market, eps, every=n_sim)
     seconds = time.time() - t0
 
     res = dict(config=a.config, sampler=a.sampler, order_size=a.order_size, n_episodes=len(eps),
                window=a.window, seed=a.seed, n_sim_steps=n_sim, seconds=seconds, torch=torch.__version__,
-               real_only=a.real_only, sides={})
+               real_only=a.real_only, skip_agent=a.skip_agent, sides={})
     acc = {s: dict(real=[], agent=[], none=[], same_queue=0, refused=0, short=0, gen={}) for s in ("bid", "ask")}
-    levels = {"real": [], "none": []}
+    levels, fates = {"real": [], "none": []}, {"real": [], "none": []}
     for ep, ta, tn in zip(eps, tr_agent, tr_none):
         key = (ep.entry["message"], ep.start)
         side = sides[key]
         v = acc["bid" if side == BUY else "ask"]
-        if ta is not None:
-            for g, c in ta.gen.items():
+        tg = ta if ta is not None else tn
+        if tg is not None:
+            for g, c in tg.gen.items():
                 v["gen"][g] = v["gen"].get(g, 0) + int(c)
-            if ta.refused:
+            if tg.refused:
                 v["refused"] += 1
                 continue
         day = DayFiles.open(a.shard_root, ep.entry)
@@ -395,17 +457,22 @@ def main():
         v["real"].append(describe(rp, counterfactual(rp["rows"], ahead, side, price, a.order_size), real_q, side,
                                   price, a.order_size, a.window))
         levels["real"] += level_answers(rp, a.window)
-        if ta is None:
+        fates["real"] += order_fates(rp, a.window)
+        if tn is None:
             continue
-        v["same_queue"] += int(real_q == market.ahead[key + ("agent",)] == market.ahead[key + ("none",)])
-        pa = sim_path(market, key + ("agent",), ta.mid)
         pn = sim_path(market, key + ("none",), tn.mid)
-        if min(len(pa["mids"]), len(pn["mids"])) < n:
+        v["same_queue"] += int(real_q == market.ahead[key + ("none",)]
+                               and (ta is None or real_q == market.ahead[key + ("agent",)]))
+        if len(pn["mids"]) < n:
             v["short"] += 1                                  # keep: fewer rows than the window needs
-        v["agent"].append(describe(pa, agent_fills(pa["rows"]), real_q, side, price, a.order_size, a.window))
+        if ta is not None:
+            pa = sim_path(market, key + ("agent",), ta.mid)
+            v["short"] += int(len(pa["mids"]) < n <= len(pn["mids"]))
+            v["agent"].append(describe(pa, agent_fills(pa["rows"]), real_q, side, price, a.order_size, a.window))
         v["none"].append(describe(pn, counterfactual(pn["rows"], ahead, side, price, a.order_size), real_q, side,
                                   price, a.order_size, a.window))
         levels["none"] += level_answers(pn, a.window)
+        fates["none"] += order_fates(pn, a.window)
     for s, v in acc.items():
         m = len(v["real"])
         res["sides"][s] = dict(episodes=m, refused=v["refused"], short=v["short"],
@@ -413,8 +480,9 @@ def main():
                                ahead_shares_median=float(np.median([d["ahead"] for d in v["real"]])) if m else None,
                                gen=v["gen"], **{k: stats(v[k], a.window) for k in paths})
     res["level_answers"] = {k: level_stats(levels[k]) for k in levels if levels[k]}
+    res["order_fates"] = {k: fate_stats(fates[k]) for k in fates if fates[k]}
     json.dump(res, open(a.out, "w"), indent=1)
-    json.dump(dict(**{s: {k: acc[s][k] for k in paths} for s in acc}, levels=levels),
+    json.dump(dict(**{s: {k: acc[s][k] for k in paths} for s in acc}, levels=levels, fates=fates),
               open(a.out.replace(".json", "_episodes.json"), "w"))
 
     def r2(x):
@@ -440,6 +508,11 @@ def main():
                   + " | exact h16 " + str(r2(d["move_16_exact"]["mean"])) + " beyond h16 "
                   + str(r2(d["move_16_beyond"]["mean"])) + f" | half {r2(d['half_spread']['mean'])} maker exact "
                   + " ".join(f"h{h} {r2(d[f'maker_{h}_exact']['mean'])}" for h in MARKOUTS))
+    for k, fs in res["order_fates"].items():
+        for b, d in fs.items():
+            print(f"fates {k:4s} {b:>5s}: n {d['n']} " + " ".join(f"exec<{w} {r2(d[f'executed_{w}'])}" for w in FATE_WITHIN)
+                  + f" deleted_first {r2(d['deleted_first'])} first_exec_med {d['first_exec_median']} mo "
+                  + " ".join(f"h{h} {r2(d[f'markout_{h}']['mean'])}({r2(d[f'markout_{h}']['se'])})" for h in MARKOUTS))
     print(f"{seconds:.0f} s")
 
 
