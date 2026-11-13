@@ -49,8 +49,10 @@ Level answers (real and none paths, all starts): every background execution in
 the window, with the shares at the best price of its side just before it, is
 classed as taking part of that level, exactly that level, or more (a deeper
 price or more shares than shown). With the mid's move after it in the
-aggressor's direction. This asks how a thin best level is taken, in the market
-and in the simulator without the order.
+aggressor's direction, the half spread before it, and the markouts of the resting
+side at the level's price (a maker that was really filled, no counterfactual).
+This asks how a thin best level is taken, and what its last shares earn, in the
+market and in the simulator without the order.
 
     python run/post_training/policy_bench/check_fills.py --config configs/policy_bench/v1.yaml \
         --shard_root <mount> --out <file.json> [--sampler mask] [--order_size 1] [--n_episodes 500] [--window 512]
@@ -194,10 +196,11 @@ def agent_fills(rows: np.ndarray) -> list[tuple[int, int]]:
 
 
 def level_answers(path: dict, window: int) -> list[tuple]:
-    """(shares at the best of its side before it, outcome, move at LEVEL_MOVES) per background
-    execution message in the window. Outcome 0 part of the level, 1 exactly the level, 2 beyond it.
-    The move is the mid h messages after against the mid before, in the aggressor's direction, bps.
-    For paths without agent rows (real, none)."""
+    """(shares at the best of its side before it, outcome, move at LEVEL_MOVES, half spread, maker
+    markout at MARKOUTS) per background execution message in the window. Outcome 0 part of the level,
+    1 exactly the level, 2 beyond it. The move is the mid h messages after against the mid before, in
+    the aggressor's direction; the maker markout is the mid h messages after against the best price
+    before, signed for the resting side; all in bps. For paths without agent rows (real, none)."""
     rows, mids = path["rows"], path["mids"]
     b = np.searchsorted(rows[:, 0], np.arange(window + 1))
     prev, out = np.asarray(path["top0"], np.int64), []
@@ -216,13 +219,17 @@ def level_answers(path: dict, window: int) -> list[tuple]:
             sign = -1 if bid else 1
             moves = [sign * (mids[m + h] - mid0) / mid0 * 1e4 if ok and m + h < len(mids) else np.nan
                      for h in LEVEL_MOVES]
-            out.append((int(v0), outcome, *moves))
+            maker = [-sign * (mids[m + h] - p0) / p0 * 1e4 if ok and m + h < len(mids) else np.nan
+                     for h in MARKOUTS]
+            half = (prev[0] - prev[2]) / 2 / mid0 * 1e4 if ok else np.nan
+            out.append((int(v0), outcome, *moves, half, *maker))
         prev = r[-1, 8:12]
     return out
 
 
 def level_stats(answers: list[tuple]) -> dict:
-    a = np.array(answers, np.float64).reshape(-1, 2 + len(LEVEL_MOVES))
+    nm = len(LEVEL_MOVES)
+    a = np.array(answers, np.float64).reshape(-1, 3 + nm + len(MARKOUTS))
     out = {}
     for lo, hi in LEVEL_BUCKETS:
         x = a[(a[:, 0] >= lo) & (a[:, 0] <= hi)]
@@ -231,6 +238,10 @@ def level_stats(answers: list[tuple]) -> dict:
             d[f"move_{h}"] = _mean_se(x[:, 2 + j])
             for i, o in enumerate(OUTCOMES):
                 d[f"move_{h}_{o}"] = _mean_se(x[x[:, 1] == i, 2 + j])
+        d["half_spread"] = _mean_se(x[:, 2 + nm])
+        for j, h in enumerate(MARKOUTS):
+            d[f"maker_{h}"] = _mean_se(x[:, 3 + nm + j])
+            d[f"maker_{h}_exact"] = _mean_se(x[x[:, 1] == 1, 3 + nm + j])
         out[f"{lo}-{hi}" if hi < 10**12 else f"{lo}+"] = d
     return out
 
@@ -427,7 +438,8 @@ def main():
             print(f"levels {k:4s} {b:>6s}: n {d['n']} " + " ".join(f"{o} {r2(d[o])}" for o in OUTCOMES)
                   + " move " + " ".join(f"h{h} {r2(d[f'move_{h}']['mean'])}" for h in LEVEL_MOVES)
                   + " | exact h16 " + str(r2(d["move_16_exact"]["mean"])) + " beyond h16 "
-                  + str(r2(d["move_16_beyond"]["mean"])))
+                  + str(r2(d["move_16_beyond"]["mean"])) + f" | half {r2(d['half_spread']['mean'])} maker exact "
+                  + " ".join(f"h{h} {r2(d[f'maker_{h}_exact']['mean'])}" for h in MARKOUTS))
     print(f"{seconds:.0f} s")
 
 
