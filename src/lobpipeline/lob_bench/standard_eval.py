@@ -60,6 +60,15 @@ that was not run is ``null`` in the record.
   from the conditioning messages and the evaluated value from the generated
   ones. The driver's score names still say ``t-lag=500``; the record states
   the lag that ran.
+- ``return_bench``: the event-anchored return bench
+  (``lobpipeline.return_bench``) on the same folders. Unlike every score
+  above, it pairs windows: each window's generated mid-price return is
+  compared with the real return of the same window, so it changes if the
+  pairing is shuffled and the LOB-Bench scores do not. It anchors on the last
+  conditioning message. By default that message must be a trade, so it uses
+  only the windows that end on one and counts the rest. Each horizon reports
+  how many windows it kept, the trade-sign baseline (which beat every model
+  in docs/experiments/return_bench_event_anchored) and a shuffle null.
 """
 
 from __future__ import annotations
@@ -109,6 +118,16 @@ KL_METHOD = {
     "bins": "the scorer's L1 bins (the score frame's group column)",
     "smoothing": "one pseudo-count per bin on each side",
     "units": "nats",
+}
+# The event-anchored return bench's own default horizons, in milliseconds.
+RETURN_BENCH_HORIZONS_MS = (1.0, 5.0, 10.0, 25.0, 50.0)
+RETURN_BENCH_ANCHORS = ("trade", "any")
+RETURN_BENCH_METHOD = {
+    "question": "does each window's generated mid-price return match that window's real return",
+    "pairing": "per window: generated vs the real continuation of the same window",
+    "return": "log(mid at t0 + horizon / mid at t0), t0 = the last conditioning message",
+    "scores": "IC (Pearson), ranked IC (Spearman), direction accuracy (zero real returns left out)",
+    "baseline": "the anchoring trade's side alone, with no model output",
 }
 
 
@@ -335,6 +354,104 @@ def optional_mode_section(
     return section
 
 
+def _number(value: Any) -> float | None:
+    return float(value) if _finite(value) else None
+
+
+def return_bench_section(
+    inference_dir: str | Path,
+    *,
+    horizons_ms: Sequence[float] = RETURN_BENCH_HORIZONS_MS,
+    workers: int = 32,
+    any_anchor: bool = False,
+) -> dict[str, Any]:
+    """The event-anchored return bench as a record section.
+
+    Each window's generated mid-price return is paired with the real return of
+    the same window, ``horizon`` ms after the last conditioning message. With
+    the default anchor rule that message must be a trade, and windows that end
+    on anything else are counted and left out. ``any_anchor`` keeps every
+    window, and the trade-sign baseline is then ``null``, because it has no
+    trade to read a side from.
+    """
+    from lobpipeline.return_bench.event_anchored import shuffle_null
+    from lobpipeline.return_bench.run_event_bench import (
+        build_table,
+        collect,
+        find_paired_files,
+    )
+
+    horizons = [float(horizon) for horizon in horizons_ms]
+    pairs = find_paired_files(str(inference_dir))
+    if not pairs:
+        raise ValueError(f"return bench: no paired cond/gen/real windows under {inference_dir}")
+    rec, counts, coverage = collect(pairs, horizons, workers, require_trade=not any_anchor)
+    if counts["n_used"] == 0:
+        raise ValueError(
+            f"return bench: none of {counts['n_pairs']} windows could be anchored "
+            f"({counts['n_not_trade']} do not end on a trade, {counts['n_bad']} unreadable)"
+        )
+    table = build_table(rec, horizons, counts["n_used"])
+    rows = []
+    for horizon, row in zip(horizons, table.to_dict("records")):
+        null = shuffle_null(rec[horizon]["pred"], rec[horizon]["real"])
+        model = {
+            "ic": _number(row["IC"]),
+            "ranked_ic": _number(row["ranked_IC"]),
+            "direction_accuracy": _number(row["direction_acc"]),
+            "magnitude_ranked_ic": _number(row["magnitude_ric"]),
+        }
+        baseline = None
+        beats = None
+        if not any_anchor:
+            baseline = {
+                "ranked_ic": _number(row["baseline_ranked_IC"]),
+                "direction_accuracy": _number(row["baseline_direction_acc"]),
+            }
+            pairs_to_compare = [
+                (model[name], baseline[name]) for name in ("ranked_ic", "direction_accuracy")
+            ]
+            if all(m is not None and b is not None for m, b in pairs_to_compare):
+                beats = all(m > b for m, b in pairs_to_compare)
+        rows.append({
+            "horizon_ms": horizon,
+            "windows": int(row["N_cov"]),
+            "windows_with_a_price_move": int(row["N_eff"]),
+            "model": model,
+            "baseline": baseline,
+            "model_beats_baseline": beats,
+            "shuffle_null": {
+                "ic_mean": _number(null["IC_mean"]),
+                "ic_sd": _number(null["IC_sd"]),
+                "direction_accuracy_mean": _number(null["dir_acc_mean"]),
+            },
+            "returns": {
+                "std_generated_bp": _number(row["std_gen_bp"]),
+                "std_real_bp": _number(row["std_real_bp"]),
+                "std_ratio": _number(row["std_ratio"]),
+                "ks": _number(row["ks_stat"]),
+                "ks_pvalue": _number(row["ks_pvalue"]),
+            },
+            "messages_in_horizon": {
+                "generated_mean": _number(row["gen_msg"]),
+                "real_mean": _number(row["real_msg"]),
+            },
+        })
+    return {
+        **RETURN_BENCH_METHOD,
+        "anchor": "any" if any_anchor else "trade",
+        "horizons_ms": horizons,
+        "windows": {
+            "paired": counts["n_pairs"],
+            "anchored": counts["n_used"],
+            "not_a_trade": counts["n_not_trade"],
+            "unreadable": counts["n_bad"],
+            "covered_at_every_horizon": sum(1 for kept in coverage if set(horizons) <= kept),
+        },
+        "horizons": rows,
+    }
+
+
 def interpreter_packages(python: str) -> dict[str, str]:
     """Installed distributions of the scoring interpreter, name to version."""
     probe = (
@@ -389,6 +506,7 @@ def build_record(
     provenance: Mapping[str, Any],
     kl: Mapping[str, Any] | None = None,
     optional: Mapping[str, Mapping[str, Any]] | None = None,
+    return_bench: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the standard record, refusing a run without its headline numbers.
 
@@ -428,6 +546,11 @@ def build_record(
             raise ValueError(f"optional section for {mode} holds mode {section.get('mode')!r}")
     if kl is not None and set(kl.get("features", {})) != set(LOBBENCH_FEATURES):
         raise ValueError("the KL section does not cover the 21 pinned features")
+    if return_bench is not None:
+        if return_bench.get("anchor") not in RETURN_BENCH_ANCHORS:
+            raise ValueError(f"return bench anchor {return_bench.get('anchor')!r} is not known")
+        if not return_bench.get("horizons"):
+            raise ValueError("the return bench section has no horizons")
     features = {
         feature: {
             distance: {
@@ -456,6 +579,7 @@ def build_record(
         "kl": dict(kl) if kl is not None else None,
         **{OPTIONAL_SECTION[mode]: (dict(optional[mode]) if mode in optional else None)
            for mode in OPTIONAL_MODES},
+        "return_bench": dict(return_bench) if return_bench is not None else None,
         "scorer": {
             "tree_sha256": scorer_tree_sha256,
             "benchmark_root": pooled.benchmark_root,

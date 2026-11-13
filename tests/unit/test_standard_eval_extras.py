@@ -18,6 +18,7 @@ from lobpipeline.lob_bench.standard_eval import (
     load_protocol,
     optional_mode_section,
     pooled_kl,
+    return_bench_section,
 )
 from lobpipeline.scorer import read_merge_record
 DISTANCES = ("l1", "wasserstein", "ks")
@@ -161,7 +162,7 @@ def _record(tmp_path: Path, **overrides):
 
 def test_extras_are_null_unless_run(tmp_path: Path) -> None:
     record = _record(tmp_path)
-    for name in ("kl", "conditional", "context", "time_lagged"):
+    for name in ("kl", "conditional", "context", "time_lagged", "return_bench"):
         assert record[name] is None
     assert record["headline"]["ws21"] == 0.5
 
@@ -189,3 +190,103 @@ def test_an_unknown_optional_mode_is_refused(tmp_path: Path) -> None:
         _record(tmp_path, optional={"divergence": section})
     with pytest.raises(ValueError, match="holds mode"):
         _record(tmp_path, optional={"context": section})
+
+
+# Return bench: a tiny inference folder with closed-form returns.
+DATE = "2026-01-02"
+T0 = 100.0
+
+
+def _book(path: Path, mids: list[float]) -> None:
+    # load_mid reads columns 0 (ask) and 2 (bid).
+    rows = [f"{m + 50:.0f},1,{m - 50:.0f},1" for m in mids]
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+
+def _messages(path: Path, times: list[float], last_event: int = 4, direction: int = 1) -> None:
+    rows = [f"{t:.6f},1,0,1,0,1" for t in times[:-1]]
+    rows.append(f"{times[-1]:.6f},{last_event},0,1,0,{direction}")
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+
+def _window(root: Path, rid: int, real_move: float, gen_move: float, *,
+            last_event: int = 4, direction: int = 1, p0: float = 3_000_000.0) -> None:
+    for name in ("data_cond", "data_real", "data_gen"):
+        (root / name).mkdir(parents=True, exist_ok=True)
+    stem = f"GOOG_{DATE}"
+    _messages(root / "data_cond" / f"{stem}_message_real_id_{rid}.csv",
+              [T0 - 0.002, T0], last_event=last_event, direction=direction)
+    _book(root / "data_cond" / f"{stem}_orderbook_real_id_{rid}.csv", [p0, p0])
+    # 30 messages from 0.5 ms, 2 ms apart, so every horizon up to 58 ms sees
+    # the move, which happens at the first one.
+    times = [T0 + 0.0005 + 0.002 * k for k in range(30)]
+    for side, move, suffix in (("data_real", real_move, ""), ("data_gen", gen_move, "_gen_id_0")):
+        _messages(root / side / f"{stem}_message_real_id_{rid}{suffix}.csv", times)
+        _book(root / side / f"{stem}_orderbook_real_id_{rid}{suffix}.csv",
+              [p0 + move] * len(times))
+
+
+def _folder(tmp_path: Path, gen_sign: int = 1) -> Path:
+    root = tmp_path / "inference"
+    # Seller-initiated trades (direction +1) fall, buyer-initiated ones rise,
+    # so the trade-sign baseline is right on every window.
+    moves = [-100, -200, -300, 100, 250, 400]
+    for rid, move in enumerate(moves):
+        _window(root, rid, move, gen_sign * move, direction=1 if move < 0 else -1)
+    return root
+
+
+def test_return_bench_scores_a_perfect_generator_at_one(tmp_path: Path) -> None:
+    section = return_bench_section(_folder(tmp_path), workers=2)
+    assert section["anchor"] == "trade"
+    assert section["windows"]["anchored"] == 6
+    assert section["windows"]["covered_at_every_horizon"] == 6
+    for row in section["horizons"]:
+        assert row["windows"] == 6
+        assert row["model"]["ic"] == pytest.approx(1.0)
+        assert row["model"]["direction_accuracy"] == 1.0
+        assert row["baseline"]["direction_accuracy"] == 1.0
+
+
+def test_return_bench_sees_a_generator_that_moves_the_wrong_way(tmp_path: Path) -> None:
+    section = return_bench_section(_folder(tmp_path, gen_sign=-1), workers=2)
+    row = section["horizons"][0]
+    assert row["model"]["ic"] == pytest.approx(-1.0)
+    assert row["model"]["direction_accuracy"] == 0.0
+    assert row["model_beats_baseline"] is False
+
+
+def test_windows_not_ending_on_a_trade_are_counted_and_left_out(tmp_path: Path) -> None:
+    root = _folder(tmp_path)
+    _window(root, 6, 100, 100, last_event=1)
+    section = return_bench_section(root, workers=2)
+    assert section["windows"]["paired"] == 7
+    assert section["windows"]["anchored"] == 6
+    assert section["windows"]["not_a_trade"] == 1
+    kept = return_bench_section(root, workers=2, any_anchor=True)
+    assert kept["windows"]["anchored"] == 7
+    assert kept["horizons"][0]["baseline"] is None
+    assert kept["horizons"][0]["model_beats_baseline"] is None
+
+
+def test_a_horizon_past_the_window_keeps_no_windows(tmp_path: Path) -> None:
+    section = return_bench_section(_folder(tmp_path), horizons_ms=(10.0, 1000.0), workers=2)
+    long = section["horizons"][1]
+    assert long["windows"] == 0
+    assert long["model"]["ic"] is None
+    assert section["windows"]["covered_at_every_horizon"] == 0
+
+
+def test_no_paired_windows_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="no paired"):
+        return_bench_section(tmp_path, workers=2)
+
+
+def test_return_bench_lands_in_its_section(tmp_path: Path) -> None:
+    section = return_bench_section(_folder(tmp_path), workers=2)
+    record = _record(tmp_path, return_bench=section)
+    assert record["return_bench"]["windows"]["anchored"] == 6
+    assert record["headline"] == {"ws21": 0.5, "ks21": 0.2, "l1_21": 0.3}
+    json.dumps(record, allow_nan=False)
+    with pytest.raises(ValueError, match="anchor"):
+        _record(tmp_path, return_bench={**section, "anchor": "window"})

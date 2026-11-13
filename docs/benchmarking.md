@@ -263,9 +263,9 @@ agree. The curve compares only between records that both have it.
 `--index-file` takes another frozen index for smoke tests. Such a run is
 recorded with `"standard": false`.
 
-Four optional extras are off by default. None of them changes the headline. A
+Five optional extras are off by default. None of them changes the headline. A
 part that did not run is `null` in the record, and `provenance.seconds` holds
-what each part took. `--all-extras` turns on all four.
+what each part took. `--all-extras` turns on all five.
 
 | Flag | Record section | What it adds | Cost |
 |---|---|---|---|
@@ -273,6 +273,7 @@ what each part took. `--all-extras` turns on all four.
 | `--conditional` | `conditional` | the three `cond` scores | one more driver run |
 | `--context` | `context` | the `context` score, W1 and KS only; L1 is `null` (see "Do not read the contextual L1") | one more driver run |
 | `--time-lagged` | `time_lagged` | the three `time_lagged` scores at lag 250 | one more driver run |
+| `--return-bench` | `return_bench` | the event-anchored return bench at 1, 5, 10, 25 and 50 ms, with the trade-sign baseline and a shuffle null | reads the CSVs once more; no driver run |
 
 KL is unbounded, so its mean over the 21 features is dominated by the worst
 one. Read the per-feature values. The time-lagged mode runs at lag 250 because
@@ -281,6 +282,20 @@ the driver's own lag of 500 needs sequences longer than 500 messages. Ours are
 lagged value comes from the conditioning messages and the evaluated value from
 the generated ones. The driver's score names still read `t-lag=500`; the
 record's `time_lag` is the lag that ran.
+
+The return bench is the only extra that pairs windows. Every LOB-Bench score,
+conditional ones included, pools all windows first, so shuffling which
+generated window goes with which input leaves it unchanged. The return bench
+compares each window's generated mid-price return with the real return of the
+same window, so a shuffle drops its IC to about zero. It anchors on the last
+conditioning message. By default that message must be a trade: the standard
+windows were not cut at trades, so only the windows that end on one are
+scored, and `return_bench.windows` counts the rest. Each horizon also drops
+windows whose 250 messages end before the horizon, and says how many it kept.
+`--return-bench-any-anchor` keeps every window; the trade-sign baseline is
+then `null`. Read every model number next to the baseline: in
+`docs/experiments/return_bench_event_anchored/` the baseline beat all four
+models on direction.
 
 Two properties of the scorer that the record does not hide:
 

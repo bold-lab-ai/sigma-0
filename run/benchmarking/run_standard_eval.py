@@ -55,6 +55,7 @@ from lobpipeline.lob_bench.standard_eval import (  # noqa: E402
     optional_mode_section,
     pooled_intervals,
     pooled_kl,
+    return_bench_section,
     run_provenance,
     standard_scorer,
     write_record,
@@ -97,11 +98,20 @@ def main(argv: list[str] | None = None) -> int:
     extras.add_argument("--time-lagged", action="store_true",
                         help=f"the driver's time_lagged mode at lag {STANDARD_TIME_LAG}: "
                              "one more driver run")
+    extras.add_argument("--return-bench", action="store_true",
+                        help="the event-anchored return bench: each window's generated "
+                             "mid-price return against the same window's real one")
+    extras.add_argument("--return-bench-any-anchor", action="store_true",
+                        help="with --return-bench, keep windows whose last conditioning "
+                             "message is not a trade (the trade-sign baseline is then null)")
     extras.add_argument("--all-extras", action="store_true",
-                        help="all four extras above")
+                        help="all five extras above, the return bench with trade anchors")
     args = parser.parse_args(argv)
     if args.all_extras:
         args.kl = args.conditional = args.context = args.time_lagged = True
+        args.return_bench = True
+    if args.return_bench_any_anchor and not args.return_bench:
+        parser.error("--return-bench-any-anchor needs --return-bench")
     wanted_modes = [
         mode
         for mode, on in (("cond", args.conditional), ("context", args.context),
@@ -183,6 +193,15 @@ def main(argv: list[str] | None = None) -> int:
                 time_lag=time_lag,
             )
             seconds[mode] = round(time.monotonic() - started, 1)
+        return_bench = None
+        if args.return_bench:
+            started = time.monotonic()
+            return_bench = return_bench_section(
+                inference_dir,
+                workers=args.n_workers,
+                any_anchor=args.return_bench_any_anchor,
+            )
+            seconds["return_bench"] = round(time.monotonic() - started, 1)
 
     record = build_record(
         run_name=args.run_name,
@@ -192,6 +211,7 @@ def main(argv: list[str] | None = None) -> int:
         divergence=divergence,
         kl=kl,
         optional=optional,
+        return_bench=return_bench,
         intervals=pooled_intervals(plan.score_path),
         inputs=inputs,
         provenance=run_provenance(
