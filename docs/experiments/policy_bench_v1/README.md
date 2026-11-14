@@ -112,7 +112,7 @@ signal argues against by more than 0.5 bps.
 | NoTrade | sim | 0 | | 0 | |
 | SignRule(2, 1) | sim | -1.30 (-9.0) | -3.74 | -1.42 (-6.0) | -4.50 |
 | SignRule(2, 1) | replay | -1.45 (-7.4) | -4.01 | -1.81 (-7.0) | -5.06 |
-| SignRule(2, 100) | sim | -1,092 (-3.8) | -14.12 | -1,306 (-4.6) | -17.47 |
+| SignRule(2, 100) | sim | -1,092 (-3.8) | -14.12 | -1,306 (-4.5) | -17.47 |
 | SignRule(2, 100) | replay | -332 (-6.2) | -7.95 | -506 (-4.3) | -10.16 |
 | SkewQuoter | sim | -44.6 (-5.0) | -3.44 | -46.0 (-2.1) | -4.06 |
 
@@ -124,6 +124,10 @@ signal argues against by more than 0.5 bps.
 - SkewQuoter is positive marked to mid (+3.2 $ dev, +14.3 $ test) but ends
   with 160 to 180 shares on average, and the flatten costs more than the
   spread it earned. Its maker credit is too high anyway (section 4, limit 1).
+- Why the score closes the position instead of marking it to mid: mark to
+  mid lets a policy leave for free (no spread, fee or impact), so a policy
+  ranked by it would learn to hold inventory. Both are in every result
+  file; their gap is the cost of exiting. For SignRule it is about 10%.
 - Unpriced: 0 in every run.
 
 ## 4. Known limits
