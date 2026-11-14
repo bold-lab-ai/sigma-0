@@ -20,17 +20,58 @@ encodes its own input from that state.
 | `simulator.py` | The newtok model with a KV cache. `BatchKVSimulator` holds several sequences of their own lengths: prefill one row, step every row by one token, cut back one row. `KVSimulator` is the one-row case. |
 | `signal.py` | The return signal: processed rows from our book (`price_rel`, the reference columns), and the fine-tuned head's prediction at a decision. |
 | `rules.py` | Legality of a background message in a book (what the sampler rejects), and how a legal message changes the book. |
-| `types.py` | Plain data: `MarketOrder`, `LimitOrder`, `Cancel`, `Fill`, `Obs`, `Episode`. |
+| `types.py` | Plain data: `MarketOrder`, `LimitOrder`, `Cancel`, `Fill`, `Obs` (with `pending`, the orders on their way), `Episode`. |
 | `history.py` | `RowLog`, the processed rows and L10 rows both models read, and `start_state`, an episode's book and log rebuilt from a real day. |
-| `market.py` | `ReplayMarket`: real rows, virtual agent orders, market orders only, fill model `MidFill` or `BookFill`, latency and inventory cap. |
+| `market.py` | `ReplayMarket`: real rows, virtual agent orders, market orders only, fill model `MidFill` or `BookFill`, latency (`latency` messages or `latency_ns`) and inventory cap. |
 | `sampling.py` | How a background message is drawn: the message grammar with the absolute time forced to t_prev + dt, `finish` (decodes, canonical, before the close, `rules.check`, both sides left non-empty) and `legal_tokens`, the per-token masks used after 32 rejections. |
-| `sim_market.py` | `SimMarket`: B slots decoded together with `BatchKVSimulator`, each row on its own (a row stops only at its decisions and its end). Agent orders are fed to the simulator as forced messages; background messages are drawn whole and rejected until legal; executions fill agent orders front of queue first. |
+| `sim_market.py` | `SimMarket`: B slots decoded together with `BatchKVSimulator`, each row on its own (a row stops only at its decisions and its end). Agent orders are fed to the simulator as forced messages; background messages are drawn whole and rejected until legal; executions fill agent orders front of queue first. With `latency_ns`, a background draw later than an order's due time is discarded and drawn again after the order. |
 | `rollout.py` | `rollout(policy, signal, market, episodes, every)` -> one `Trace` per episode. Keeps `market.batch` slots busy (a slot takes the next episode when its own ends), one policy copy per episode, the signal one row per forward. |
-| `trace.py` | `Trace` (mids, end book, fills, decisions, signal) and `save` / `load` as one npz. |
-| `costs.py`, `terminal.py`, `score.py` | `MakerTaker` fees; `MarkToMid`, `MarkToMicro`, `FlattenTaker`; `score(traces, terminal, cost)`, a pure function of the traces. |
+| `trace.py` | `Trace` (mids, end book as L10 and as full depth `depth_end`, fills, decisions, signal) and `save` / `load` as one npz. |
+| `costs.py`, `terminal.py`, `score.py` | `MakerTaker` fees; `MarkToMid`, `MarkToMicro`, `FlattenTaker`; `score(traces, terminal, cost)`, a pure function of the traces; the ranking figure is `daily_pnl_usd`. |
 | `episodes.py` | Episode sets. `return_bench_decisions` is nano-sigma's test decision set. |
-| `policies/` | `NoTrade`, `SignRule`. |
+| `policies/` | `NoTrade`, `SignRule`, `SkewQuoter`. |
 | `nanosigma/` | Vendored nano-sigma encoding code, byte for byte. See `nanosigma/PROVENANCE.md`. |
+
+## v1: what is fixed
+
+`configs/policy_bench/v1.yaml` (dev, January 2026) and `v1_test.yaml` (test,
+2026-02-02 to 02-13, run only on frozen policies). Both: 200 episodes of 1,024
+background messages; the simulator's context is the last 2,944 real messages
+and the signal's the last 3,968 rows; a decision every 64 messages; orders
+reach the market 100 ms after the decision (`latency_ns`); masked sampling
+(`max_rejections: 0`); maker rebate $0.002 and taker fee $0.003 per share;
+inventory cap +-1,000 shares; one rollout per episode. The evidence for each
+choice is in `docs/experiments/policy_bench_v1/README.md`.
+
+## Writing a policy
+
+A policy is a class with `reset(episode)` and `step(obs) -> list of orders`
+(`policies/no_trade.py` is the smallest). `rollout` keeps one copy per
+episode. At each decision `obs` holds:
+
+- `k`, `t_s`, `t_ns`: background messages so far and the time of the last row
+- `l10`: the top 10 levels (ask price, ask shares, bid price, bid shares per level)
+- `position` (shares) and `cash` (LOBSTER units x shares)
+- `open_orders`: `(oid, side, price, remaining)` of the agent's resting orders
+- `pending`: orders submitted that have not reached the market yet
+- `fills`: the agent's fills since the previous decision
+- `signal`: the signal's predicted returns in bps at horizons 16, 64, 128,
+  512, 1,024 messages
+
+Orders: `MarketOrder(side, size)`, `LimitOrder(side, price, size)` (a whole
+number of cents, not crossing), `Cancel(oid)`. An order is refused if it would
+cross, take the position past the cap, or leave a side of the book empty.
+v1 policies read only `obs`; they bring no model of their own.
+
+Run one on dev:
+
+    PYTHON=<env>/bin/python sbatch --nodes=1 --output=<dir>/%x_%j.out \
+        run/post_training/policy_bench/evaluate.sbatch --policy <module:Class> --kwargs '<json>' --out <file.json>
+
+Rank by `scores.flatten_taker.daily_pnl_usd` and its `daily_pnl_t`: the dollar
+PnL per episode after closing the position against the full end book, averaged
+within each date, then over dates. An episode whose position exceeds the whole
+side of the end book is unpriced and counted in `unpriced`.
 
 ## Rules a background message obeys
 
