@@ -5,6 +5,8 @@
 #   PYTHON=<env with torch>/bin/python sbatch --nodes=1 --output=<dir>/%x_%j.out \
 #       run/post_training/policy_bench/evaluate.sbatch --policy <module:Class> --kwargs <json> --out <file.json>
 #
+# The test split: CONFIG=configs/policy_bench/v1_test.yaml (the shard month follows the config).
+#
 #SBATCH --job-name=policy-bench-eval
 #SBATCH --account=brics.u6oz
 #SBATCH --partition=workq
@@ -23,7 +25,9 @@ PYTHON="${PYTHON:?PYTHON (an env with torch) is required}"
 CONFIG="${CONFIG:-configs/policy_bench/v1.yaml}"
 Q=/projects/public/u6oz/quant
 SHARD_DIR="${SHARD_DIR:-$Q/lob_preproc_sp500_squashfs_v2_20261013}"   # the config's shards
-MONTH="${MONTH:-2026-01}"
+CFG_PATH="$CONFIG"; [[ "$CFG_PATH" = /* ]] || CFG_PATH="$WORKDIR/$CFG_PATH"
+MONTH="${MONTH:-$(timeout -s KILL 60 sed -n 's/^month:[[:space:]]*\([0-9-]*\).*/\1/p' "$CFG_PATH")}"   # the config's month
+[ -n "$MONTH" ] || { echo "no month in $CFG_PATH" >&2; exit 2; }
 
 MNT="/tmp/policy_bench_eval_${SLURM_JOB_ID}"
 cleanup() { fusermount -u "$MNT/$MONTH" 2>/dev/null || fusermount3 -u "$MNT/$MONTH" 2>/dev/null || true; }
