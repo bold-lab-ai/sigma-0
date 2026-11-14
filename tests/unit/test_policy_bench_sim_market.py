@@ -114,8 +114,10 @@ def test_latency_ns_feeds_the_order_at_its_due_time(tmp_path, model):
     t0 = m._t_prev(r)
     m.record_decision(0, None)
     m.submit(0, [LimitOrder(BUY, 9_900, 2)])
+    assert m.observe(0).pending == [LimitOrder(BUY, 9_900, 2)]   # on its way until it is fed
     while not m.done():
         m.advance()
+    assert m.observe(0).pending == []
     rows = r.log.rows(r.log.n)
     t = rows[:, 8] * NS + rows[:, 9]
     assert (np.diff(t) >= 0).all()                         # time never goes back

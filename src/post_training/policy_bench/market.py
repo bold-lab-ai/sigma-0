@@ -113,7 +113,7 @@ class ReplayMarket:
     def observe(self, i: int = 0) -> Obs:
         t = self.rowlog.rows(1)[0]
         obs = Obs(self.k, int(t[8]), int(t[9]), self.rowlog.now[3:].copy(), self.position, self.cash,
-                  [], self._new)
+                  [], self._new, pending=[o for _, _, o in self._pending])
         self._new = []
         return obs
 

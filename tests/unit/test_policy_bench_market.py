@@ -192,6 +192,36 @@ def test_replay_reuses_the_days_book_with_the_same_result(tmp_path):
     assert reused[1].mid.tolist() == [10_050.0, 10_150.0, 10_150.0]
 
 
+def test_policies_count_orders_on_their_way():
+    from post_training.policy_bench.policies import SkewQuoter
+    from post_training.policy_bench.types import Cancel, Obs
+    l10 = _l10(10_100, 5, 10_000, 5)
+    rule = SignRule(0, size=100)
+    sig = np.array([1.0])
+    assert rule.step(Obs(0, 0, 0, l10, 0, 0.0, signal=sig)) == [MarketOrder(BUY, 100)]
+    assert rule.step(Obs(0, 0, 0, l10, 0, 0.0, signal=sig, pending=[MarketOrder(BUY, 100)])) == []
+    assert rule.step(Obs(0, 0, 0, l10, 100, 0.0, signal=-sig, pending=[MarketOrder(SELL, 100)])) == \
+        [MarketOrder(SELL, 100)]
+    q = SkewQuoter(index=0, size=100, threshold=0.5)
+    obs = Obs(0, 0, 0, l10, 0, 0.0, open_orders=[(7, BUY, 9_900, 100)], signal=np.array([0.0]),
+              pending=[LimitOrder(BUY, 10_000, 100), Cancel(7)])
+    assert q.step(obs) == [LimitOrder(SELL, 10_100, 100)]   # the bid is on its way, its old bid's cancel too
+
+
+def test_replay_shows_orders_on_their_way(tmp_path):
+    entry = write_day(tmp_path, ns=(0, 0, 1_000, 2_000, 3_000, 4_000))
+    m = _market(tmp_path, MidFill(), n_messages=4, latency_ns=2_500)
+    m.reset([Episode(entry, start=2)])
+    m.record_decision(0, None)
+    m.submit(0, [MarketOrder(BUY, 1)])
+    assert m.observe(0).pending == [MarketOrder(BUY, 1)]
+    m.advance()
+    m.advance()
+    assert m.observe(0).pending == [MarketOrder(BUY, 1)]       # due at +2,500 ns, row 3 is at +2,000
+    m.advance()
+    assert m.observe(0).pending == [] and len(m.trace(0).fills) == 1
+
+
 def test_skew_quoter_keeps_good_quotes_and_leans_with_the_signal():
     from post_training.policy_bench.policies import SkewQuoter
     from post_training.policy_bench.types import Cancel, Obs

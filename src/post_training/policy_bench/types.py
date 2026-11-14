@@ -63,6 +63,7 @@ class Obs:
     open_orders: list = field(default_factory=list)  # (oid, side, price, remaining size)
     fills: list = field(default_factory=list)       # since the previous observation
     signal: np.ndarray | None = None                # predicted returns per horizon, bps
+    pending: list = field(default_factory=list)     # orders submitted that have not reached the market yet
 
 
 def mid_of(l10: np.ndarray) -> float | None:

@@ -5,7 +5,9 @@ At each decision: a bid at the best bid and an ask at the best ask, size
 against it by more than `threshold` bps (no ask when it predicts a rise, no
 bid when it predicts a fall), or when a fill there would take the position
 past +-cap. An order already resting at the price it should have is kept, so
-it keeps its place in the queue; any other open order is cancelled.
+it keeps its place in the queue; any other open order is cancelled. Orders on
+their way (Obs.pending) count: a quote sent at the wanted price is not sent
+again, and an order whose cancel is on its way is not cancelled again.
 """
 
 from __future__ import annotations
@@ -29,7 +31,13 @@ class SkewQuoter:
         if s < self.threshold and obs.position - self.size >= -self.cap:
             want[SELL] = ask
         out, kept = [], set()
+        cancelling = {o.oid for o in obs.pending if isinstance(o, Cancel)}
+        for o in obs.pending:
+            if isinstance(o, LimitOrder) and want.get(o.side) == o.price:
+                kept.add(o.side)
         for oid, side, price, _ in obs.open_orders:
+            if oid in cancelling:
+                continue
             if want.get(side) == price and side not in kept:
                 kept.add(side)
             else:

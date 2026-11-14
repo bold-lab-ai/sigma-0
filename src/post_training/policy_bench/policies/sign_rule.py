@@ -1,7 +1,8 @@
 """nano-sigma's PnL-bench rule as a policy: hold sign(predicted return) x size.
 
 At every decision the target position is sign(signal[index]) x size, reached
-with one market order. With a decision only at k = 0 and the episode as long as
+with one market order, counting the market orders still on their way
+(Obs.pending) as done. With a decision only at k = 0 and the episode as long as
 the horizon, this is the PnL bench's bet: one bet per decision point, held h
 messages.
 """
@@ -22,7 +23,8 @@ class SignRule:
 
     def step(self, obs) -> list:
         target = int(np.sign(obs.signal[self.index])) * self.size
-        d = target - obs.position
+        on_way = sum(o.side * o.size for o in obs.pending if isinstance(o, MarketOrder))
+        d = target - obs.position - on_way
         if d == 0:
             return []
         return [MarketOrder(BUY if d > 0 else SELL, abs(d))]

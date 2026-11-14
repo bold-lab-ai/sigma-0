@@ -181,7 +181,7 @@ class SimMarket:
         t = r.log.rows(1)[0]
         obs = Obs(r.k, int(t[8]), int(t[9]), r.log.now[3:].copy(), r.position, r.cash,
                   [(oid, side, *r.book.location(oid)[1:], self._remaining(r, oid)) for oid, side in r.resting.items()],
-                  r.new)
+                  r.new, pending=[o for _, _, o in r.pending])
         r.new = []
         return obs
 
