@@ -209,7 +209,7 @@ class SimMarket:
     def trace(self, i: int) -> Trace:
         r = self.rows[i]
         return Trace.build(r.ep, r.mids, r.log.now[3:], r.fills, r.decisions, r.signals, r.refused,
-                           {k: int(v) for k, v in r.gen.items()})
+                           {k: int(v) for k, v in r.gen.items()}, book=r.book)
 
     # ------------------------------------------------------------ decoding
     def run(self, every: int) -> list[int]:

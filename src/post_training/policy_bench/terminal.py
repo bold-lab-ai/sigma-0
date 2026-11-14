@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from post_training.policy_bench.book import ASK, BID
 from post_training.policy_bench.trace import Trace
 
 
@@ -30,13 +31,21 @@ class MarkToMicro:
 
 
 class FlattenTaker:
-    """Close the position against the end book, level by level (10 levels)."""
+    """Close the position against the end book, level by level: every level of the side
+    (Trace.depth_end, the agent's own orders left out), or its 10 levels for a trace
+    without depth_end. If the side holds less than the position, the episode is
+    unpriced (nan) and score counts it; a penalty for that case would go here."""
 
     def __call__(self, tr: Trace, position: int) -> tuple[float, float]:
         if position == 0:
             return 0.0, 0.0
-        body = np.asarray(tr.l10_end, np.float64).reshape(10, 4)
-        px, qty = (body[:, 2], body[:, 3]) if position > 0 else (body[:, 0], body[:, 1])
+        side = BID if position > 0 else ASK               # a long position sells into the bids
+        if len(tr.depth_end):
+            lv = tr.depth_end[tr.depth_end[:, 0] == side]
+            px, qty = lv[:, 1].astype(np.float64), lv[:, 2].astype(np.float64)
+        else:
+            body = np.asarray(tr.l10_end, np.float64).reshape(10, 4)
+            px, qty = (body[:, 2], body[:, 3]) if position > 0 else (body[:, 0], body[:, 1])
         left, value = abs(position), 0.0
         for p, q in zip(px, qty):
             if left == 0 or q <= 0 or not 0 < p < 9e9:

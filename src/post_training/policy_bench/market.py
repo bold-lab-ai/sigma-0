@@ -160,7 +160,7 @@ class ReplayMarket:
 
     def trace(self, i: int = 0) -> Trace:
         return Trace.build(self.ep, self._mid, self.rowlog.now[3:], self._fills, self._decisions,
-                           self._signals, self.refused)
+                           self._signals, self.refused, book=self.book)
 
     def _activate(self) -> list[Fill]:
         out: list[Fill] = []

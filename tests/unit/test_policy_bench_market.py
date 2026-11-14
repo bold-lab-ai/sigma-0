@@ -8,7 +8,7 @@ import pytest
 pytest.importorskip("torch")
 
 from post_training.policy_bench import trace as trace_io  # noqa: E402
-from post_training.policy_bench.book import ASK, BID, Book  # noqa: E402
+from post_training.policy_bench.book import AGENT, ASK, BID, Book  # noqa: E402
 from post_training.policy_bench.costs import NO_COST, MakerTaker  # noqa: E402
 from post_training.policy_bench.market import BookFill, MidFill, ReplayMarket  # noqa: E402
 from post_training.policy_bench.policies import NoTrade, SignRule  # noqa: E402
@@ -68,6 +68,20 @@ def test_terminal_rules_and_fees():
     assert MakerTaker()(maker.fills) == pytest.approx(-4 * 0.002 * 10_000)
 
 
+def test_flatten_taker_walks_the_whole_end_book():
+    bk = Book()
+    for i, (p, q) in enumerate([(10_100, 1), (10_000, 2), (9_000, 5)]):
+        bk.add(BID if p < 10_050 else ASK, p, i, q)
+    bk.add(BID, 10_000, 9, 50, AGENT)                     # the agent's own bid is not taken
+    ep = Episode(entry=dict(message="X.npy", date="2026-01-05"), start=0)
+    tr = Trace.build(ep, [10_050.0, 10_050.0], _l10(10_100, 1, 10_000, 2),
+                     [Fill(0, BUY, 10_100.0, 6, False, 10_050.0)], [0], [], 0, book=bk)
+    assert tr.depth_end.tolist() == [[BID, 10_000, 2], [BID, 9_000, 5], [ASK, 10_100, 1]]
+    assert FlattenTaker()(tr, 6) == (2 * 10_000.0 + 4 * 9_000.0, 6.0)   # past the L10 view
+    assert math.isnan(FlattenTaker()(tr, 8)[0])                         # more than the side: unpriced
+    assert FlattenTaker()(tr, -1) == (-10_100.0, 1.0)
+
+
 def test_score_weighs_episodes_equally():
     up = _trace([Fill(0, BUY, 10_050.0, 1, False, 10_050.0)], 10_150.5, _l10(10_200, 1, 10_100, 1))
     big = _trace([Fill(0, SELL, 10_050.0, 100, False, 10_050.0)], 10_000.0, _l10(10_100, 1, 9_900, 1))
@@ -82,11 +96,12 @@ def test_score_weighs_episodes_equally():
 def test_traces_survive_save_and_load(tmp_path):
     a = _trace([Fill(0, BUY, 10_100.0, 3, False, 10_050.0)], 10_150.0, _l10(10_200, 1, 10_100, 2))
     b = _trace([], 10_000.0, _l10(10_100, 1, 9_900, 1), date="2026-01-06")
+    a.depth_end = np.array([[BID, 10_100, 2], [ASK, 10_200, 1]], np.int64)
     trace_io.save(str(tmp_path / "t.npz"), [a, b])
     a2, b2 = trace_io.load(str(tmp_path / "t.npz"))
     for x, y in ((a, a2), (b, b2)):
         assert (x.message, x.date, x.start, x.refused) == (y.message, y.date, y.start, y.refused)
-        for f in ("mid", "l10_end", "fills", "decisions", "signal"):
+        for f in ("mid", "l10_end", "fills", "decisions", "signal", "depth_end"):
             np.testing.assert_array_equal(getattr(x, f), getattr(y, f))
 
 
