@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from post_training.policy_bench.book import ASK, BID
-from post_training.policy_bench.daydata import build_add_index
+from lobpipeline.policy_bench.book import ASK, BID
+from lobpipeline.policy_bench.daydata import build_add_index
 
 
 def l10_body(ask, aq, bid, bq):

@@ -1,0 +1,23 @@
+# Policy bench v1, test split: policy_bench_v1.yaml with the February test data. Run only on frozen policies;
+# policy search never reads it.
+# run/benchmarking/policy_bench/evaluate.py reads it. Paths are the team's shared copies.
+name: policy_bench_v1_test
+simulator: /projects/public/u6oz/model_zoo/nano-sigma/newtok_a_r1/ckpt.pt
+signal: /projects/public/u6oz/model_zoo/nano-sigma/returnft_lobert_pass1/ckpt.pt
+shards: /projects/public/u6oz/quant/lob_preproc_sp500_squashfs_v2_20261013
+manifest: /projects/public/u6oz/policy_bench/data/manifest_2026-02.json
+add_dir: /projects/public/u6oz/policy_bench/data/add_index
+episodes: /projects/public/u6oz/policy_bench/data/test_episodes_v1.json
+month: 2026-02
+history: 3968            # real rows before an episode (the signal's context)
+n_messages: 1024         # background messages per episode
+every: 64                # background messages between decisions
+latency: 1               # background messages before an order is active
+latency_ns: 100000000   # orders arrive 100 ms after the decision; replaces `latency` (results/latency)
+max_rejections: 0        # every background draw masked to legal tokens (results/fills/v2, lobbench)
+inventory_cap: 1000      # shares
+order_size: 100          # shares, the baselines' order size
+maker_rebate: 0.002      # $ per share
+taker_fee: 0.003         # $ per share
+batch: 48                # episodes decoded together on one GPU
+terminals: [mark_to_mid, flatten_taker]

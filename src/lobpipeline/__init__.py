@@ -5,6 +5,7 @@ __all__ = [
     "manifests",
     "model_store",
     "pipeline",
+    "policy_bench",
     "return_bench",
     "scorer",
 ]

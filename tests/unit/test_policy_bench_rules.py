@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import pytest
 
-from post_training.policy_bench import rules
-from post_training.policy_bench.book import AGENT, ASK, BG, BID, Book
-from post_training.policy_bench.codec import SLOT_NA, Message
+from lobpipeline.policy_bench import rules
+from lobpipeline.policy_bench.book import AGENT, ASK, BG, BID, Book
+from lobpipeline.policy_bench.codec import SLOT_NA, Message
 
 BUY, SELL = 1, 0
 

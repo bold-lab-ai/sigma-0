@@ -3,7 +3,7 @@
 The book is the state everything else reads, so its failures are the silent
 kind: a fill attributed to the wrong order or a level volume that drifts still
 produces a book that looks like a book. These tests pin the FIFO and slot
-semantics on hand-built cases; G1 (run/post_training/policy_bench/) checks the
+semantics on hand-built cases; G1 (run/benchmarking/policy_bench/) checks the
 same code against the real queue files.
 """
 
@@ -12,10 +12,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from post_training.policy_bench.book import (
+from lobpipeline.policy_bench.book import (
     AGENT, ASK, BG, BID, EMPTY_ASK_PRICE, EMPTY_BID_PRICE, SLOT_NEW, SLOT_UNKNOWN, Book,
 )
-from post_training.policy_bench.daydata import DayFiles, Snapshots
+from lobpipeline.policy_bench.daydata import DayFiles, Snapshots
 
 
 def _row(oid, evt, d, price, size):

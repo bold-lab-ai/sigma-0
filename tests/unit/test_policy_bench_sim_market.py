@@ -5,13 +5,13 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from post_training.policy_bench.book import AGENT, ASK, BID  # noqa: E402
-from post_training.policy_bench.codec import NS, Message  # noqa: E402
-from post_training.policy_bench.nanosigma.model_newtok import NanoSigmaNewTok  # noqa: E402
-from post_training.policy_bench.policies import NoTrade  # noqa: E402
-from post_training.policy_bench.rollout import rollout  # noqa: E402
-from post_training.policy_bench.sim_market import AGENT_OID0, SimMarket  # noqa: E402
-from post_training.policy_bench.types import BUY, Cancel, Episode, LimitOrder, MarketOrder  # noqa: E402
+from lobpipeline.policy_bench.book import AGENT, ASK, BID  # noqa: E402
+from lobpipeline.policy_bench.codec import NS, Message  # noqa: E402
+from lobpipeline.policy_bench.nanosigma.model_newtok import NanoSigmaNewTok  # noqa: E402
+from lobpipeline.policy_bench.policies import NoTrade  # noqa: E402
+from lobpipeline.policy_bench.rollout import rollout  # noqa: E402
+from lobpipeline.policy_bench.sim_market import AGENT_OID0, SimMarket  # noqa: E402
+from lobpipeline.policy_bench.types import BUY, Cancel, Episode, LimitOrder, MarketOrder  # noqa: E402
 from policy_bench_days import write_day  # noqa: E402
 
 

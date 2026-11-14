@@ -7,16 +7,16 @@ import pytest
 
 pytest.importorskip("torch")
 
-from post_training.policy_bench import trace as trace_io  # noqa: E402
-from post_training.policy_bench.book import AGENT, ASK, BID, Book  # noqa: E402
-from post_training.policy_bench.costs import NO_COST, MakerTaker  # noqa: E402
-from post_training.policy_bench.market import BookFill, MidFill, ReplayMarket  # noqa: E402
-from post_training.policy_bench.policies import NoTrade, SignRule  # noqa: E402
-from post_training.policy_bench.rollout import rollout  # noqa: E402
-from post_training.policy_bench.score import score  # noqa: E402
-from post_training.policy_bench.terminal import FlattenTaker, MarkToMicro, MarkToMid  # noqa: E402
-from post_training.policy_bench.trace import Trace  # noqa: E402
-from post_training.policy_bench.types import BUY, SELL, Episode, Fill, LimitOrder, MarketOrder  # noqa: E402
+from lobpipeline.policy_bench import trace as trace_io  # noqa: E402
+from lobpipeline.policy_bench.book import AGENT, ASK, BID, Book  # noqa: E402
+from lobpipeline.policy_bench.costs import NO_COST, MakerTaker  # noqa: E402
+from lobpipeline.policy_bench.market import BookFill, MidFill, ReplayMarket  # noqa: E402
+from lobpipeline.policy_bench.policies import NoTrade, SignRule  # noqa: E402
+from lobpipeline.policy_bench.rollout import rollout  # noqa: E402
+from lobpipeline.policy_bench.score import score  # noqa: E402
+from lobpipeline.policy_bench.terminal import FlattenTaker, MarkToMicro, MarkToMid  # noqa: E402
+from lobpipeline.policy_bench.trace import Trace  # noqa: E402
+from lobpipeline.policy_bench.types import BUY, SELL, Episode, Fill, LimitOrder, MarketOrder  # noqa: E402
 from policy_bench_days import write_day  # noqa: E402
 
 
@@ -193,8 +193,8 @@ def test_replay_reuses_the_days_book_with_the_same_result(tmp_path):
 
 
 def test_policies_count_orders_on_their_way():
-    from post_training.policy_bench.policies import SkewQuoter
-    from post_training.policy_bench.types import Cancel, Obs
+    from lobpipeline.policy_bench.policies import SkewQuoter
+    from lobpipeline.policy_bench.types import Cancel, Obs
     l10 = _l10(10_100, 5, 10_000, 5)
     rule = SignRule(0, size=100)
     sig = np.array([1.0])
@@ -223,8 +223,8 @@ def test_replay_shows_orders_on_their_way(tmp_path):
 
 
 def test_skew_quoter_keeps_good_quotes_and_leans_with_the_signal():
-    from post_training.policy_bench.policies import SkewQuoter
-    from post_training.policy_bench.types import Cancel, Obs
+    from lobpipeline.policy_bench.policies import SkewQuoter
+    from lobpipeline.policy_bench.types import Cancel, Obs
 
     book = _l10(10_100, 5, 10_000, 5)
     q = SkewQuoter(index=0, size=100, threshold=0.5, cap=150)

@@ -15,10 +15,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from post_training.policy_bench import codec
-from post_training.policy_bench.codec import SLOT_NA, SLOT_NONE, DecodeError, Message, decode, encode
-from post_training.policy_bench.nanosigma.data import NA, TIME0
-from post_training.policy_bench.nanosigma.newtok import EOE, QSLOT0, encode_window
+from lobpipeline.policy_bench import codec
+from lobpipeline.policy_bench.codec import SLOT_NA, SLOT_NONE, DecodeError, Message, decode, encode
+from lobpipeline.policy_bench.nanosigma.data import NA, TIME0
+from lobpipeline.policy_bench.nanosigma.newtok import EOE, QSLOT0, encode_window
 
 VENDORED = Path(codec.__file__).parent / "nanosigma"
 MID = 1_000_000

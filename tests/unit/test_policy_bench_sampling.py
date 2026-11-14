@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import numpy as np
 
-from post_training.policy_bench import rules
-from post_training.policy_bench.book import AGENT, ASK, BID, Book
-from post_training.policy_bench.codec import NS, Message, encode, mid_floor
-from post_training.policy_bench.nanosigma.data import SIGN0, TIME0
-from post_training.policy_bench.sampling import MessageState, empties_side, file_end_ns, finish, legal_tokens
+from lobpipeline.policy_bench import rules
+from lobpipeline.policy_bench.book import AGENT, ASK, BID, Book
+from lobpipeline.policy_bench.codec import NS, Message, encode, mid_floor
+from lobpipeline.policy_bench.nanosigma.data import SIGN0, TIME0
+from lobpipeline.policy_bench.sampling import MessageState, empties_side, file_end_ns, finish, legal_tokens
 
 T0 = 36_000 * NS + 123_456_789
 END = 57_600 * NS

@@ -3,9 +3,9 @@ import pytest
 
 pytest.importorskip("torch")
 
-from post_training.policy_bench.nanosigma.data import NA_VAL  # noqa: E402
-from post_training.policy_bench.daydata import build_add_index  # noqa: E402
-from post_training.policy_bench.signal import AddRegistry, price_rel_clip, processed_row  # noqa: E402
+from lobpipeline.policy_bench.nanosigma.data import NA_VAL  # noqa: E402
+from lobpipeline.policy_bench.daydata import build_add_index  # noqa: E402
+from lobpipeline.policy_bench.signal import AddRegistry, price_rel_clip, processed_row  # noqa: E402
 
 NA4 = [NA_VAL] * 4
 WIDE = 999_999

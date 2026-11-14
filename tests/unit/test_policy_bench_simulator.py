@@ -3,11 +3,11 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from post_training.policy_bench.book import ASK, BID, Book, EMPTY_ASK_PRICE, L10Writer  # noqa: E402
-from post_training.policy_bench.nanosigma.data import D_BOOK, START  # noqa: E402
-from post_training.policy_bench.nanosigma.model_newtok import NanoSigmaNewTok  # noqa: E402
-from post_training.policy_bench.nanosigma.newtok import VOCAB_NEW  # noqa: E402
-from post_training.policy_bench.simulator import BatchKVSimulator, KVSimulator  # noqa: E402
+from lobpipeline.policy_bench.book import ASK, BID, Book, EMPTY_ASK_PRICE, L10Writer  # noqa: E402
+from lobpipeline.policy_bench.nanosigma.data import D_BOOK, START  # noqa: E402
+from lobpipeline.policy_bench.nanosigma.model_newtok import NanoSigmaNewTok  # noqa: E402
+from lobpipeline.policy_bench.nanosigma.newtok import VOCAB_NEW  # noqa: E402
+from lobpipeline.policy_bench.simulator import BatchKVSimulator, KVSimulator  # noqa: E402
 
 
 def _window(T=60, M=5, seed=0):

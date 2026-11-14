@@ -3,9 +3,9 @@
 The policy bench scores one trading policy against a fixed market. The
 policy is the only input; the simulator, the signal, the data and the costs
 are fixed. v1 is the bench of policies that use our trained signal model.
-Code: `src/post_training/policy_bench/` (its README has the modules and the
-policy interface), launchers `run/post_training/policy_bench/`, configs
-`configs/policy_bench/v1.yaml` and `v1_test.yaml`. Results and job logs are
+Code: `src/lobpipeline/policy_bench/` (its README has the modules and the
+policy interface), launchers `run/benchmarking/policy_bench/`, configs
+`configs/bench/policy_bench_v1.yaml` and `policy_bench_v1_test.yaml`. Results and job logs are
 under `/projects/public/u6oz/policy_bench/results/` (RESULTS below); the
 path that led here is in `/projects/public/u6oz/policy_bench/LOGBOOK.md`.
 
