@@ -8,7 +8,9 @@ month, three continuations of the same moment are compared:
     real   the real messages after the sweep
     sweep  SimMarket from the real book before the sweep; the same sweep is fed
            as an agent market order of the same side and size (latency 0), then
-           the simulator generates
+           the simulator generates. The order comes 1 ns after the previous
+           message, or, with --real_dt, at the real sweep's own time (the gap
+           before it as in the market)
     none   the same start and seed without the sweep (the simulator's own course)
 
 sweep and none share their random numbers, so their difference is the sweep's
@@ -25,6 +27,10 @@ after the sweep), measured on the book:
 Before generating, the book right after the fed sweep is compared with the
 real one (`book_equal`): they differ only if the real sweep took shares the
 book did not show.
+
+`by_gap` splits mid_bps over all sweeps by the real gap between the sweep and
+the message before it (GAPS), so that the market's answer to a sweep after a
+pause can be compared with the simulator's.
 
     python run/post_training/policy_bench/check_sweeps.py --config configs/policy_bench/v1.yaml \
         --shard_root <mount> --out <file.json> [--per_bucket 150] [--n_messages 256]
@@ -53,6 +59,8 @@ BUCKETS = {"2": (2, 2), "3-4": (3, 4), "5+": (5, 10**9)}
 HORIZONS = [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
 BIG = 9_000_000_000
 EVT, DIR, PRICE, SIZE, TS, TNS = 1, 2, 3, 5, 8, 9
+NS = 10**9
+GAPS = {"<1us": (0, 10**3), "1us-1ms": (10**3, 10**6), "1-10ms": (10**6, 10**7), ">=10ms": (10**7, 10**18)}
 
 
 def book(l10_row: np.ndarray) -> tuple:
@@ -89,7 +97,9 @@ def find_sweeps(day: DayFiles, e: dict, history: int, n_rows: int) -> list[dict]
             per_level[int(p)] = per_level.get(int(p), 0) + int(q)
         if max(per_level.values()) > MAX_SIZE:
             continue
-        out.append(dict(start=i, end=j, levels=levels, size=int(rows[:, SIZE].sum()),
+        t = int(msg[i, TS]) * NS + int(msg[i, TNS])
+        gap = t - (int(msg[i - 1, TS]) * NS + int(msg[i - 1, TNS]))
+        out.append(dict(start=i, end=j, levels=levels, size=int(rows[:, SIZE].sum()), t=t, gap=gap,
                         side=BUY if int(msg[i, DIR]) == 0 else SELL))   # direction 0: asks executed
     return out
 
@@ -112,10 +122,16 @@ class _Recording(SimMarket):
     background message."""
 
     variant = ""
+    times: dict | None = None             # (message, start) -> the real sweep's time, under --real_dt
 
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
         self.books: dict = {}
+
+    def _agent_message(self, r, o, t=None):
+        if self.times is not None and t is None:
+            t = self.times[(r.ep.entry["message"], r.ep.start)]
+        return super()._agent_message(r, o, t)
 
     def _key(self, r):
         return (r.ep.entry["message"], r.ep.start, self.variant)
@@ -180,6 +196,8 @@ def main():
     p.add_argument("--n_messages", type=int, default=256)
     p.add_argument("--max_rejections", type=int, default=0)
     p.add_argument("--seed", type=int, default=20261112)
+    p.add_argument("--real_dt", action="store_true", help="feed each sweep at its real time, not 1 ns after "
+                   "the previous message")
     p.add_argument("--out", required=True)
     a = p.parse_args()
 
@@ -212,14 +230,18 @@ def main():
                         history=cfg["history"], n_messages=a.n_messages, latency=0, inventory_cap=10**9,
                         max_rejections=a.max_rejections)
     market.variant = "sweep"
+    if a.real_dt:
+        market.times = {(s["entry"]["message"], s["start"]): s["t"] for s in sweeps}
     tr_sweep = rollout(SweepOnce(by_key), None, market, eps, every=a.n_messages)
-    market.variant = "none"
+    market.variant, market.times = "none", None
     rollout(NoTrade(), None, market, eps, every=a.n_messages)
     seconds = time.time() - t0
 
     res = dict(config=a.config, n_messages=a.n_messages, per_bucket=a.per_bucket, seed=a.seed,
-               max_rejections=a.max_rejections, seconds=seconds, torch=torch.__version__, buckets={})
+               max_rejections=a.max_rejections, real_dt=a.real_dt, seconds=seconds, torch=torch.__version__,
+               buckets={})
     raw = {}
+    gaps = {"real": [], "sweep": [], "none": [], "gap": []}
     for b in BUCKETS:
         acc = {"real": [], "sweep": [], "none": []}
         equal = refused = 0
@@ -239,6 +261,9 @@ def main():
             acc["real"].append(measures(A["pre"], real, s["side"], n))
             acc["sweep"].append(measures(A["pre"], [A["after"]] + A["path"], s["side"], n))
             acc["none"].append(measures(B["pre"], [B["pre"]] + B["path"], s["side"], n))
+            for k in ("real", "sweep", "none"):
+                gaps[k].append(acc[k][-1])
+            gaps["gap"].append(s["gap"])
             sizes.append(s["size"])
             levels.append(s["levels"])
         n_ok = len(acc["real"])
@@ -249,6 +274,15 @@ def main():
         for k, v in acc.items():
             if v:
                 raw[f"{b}/{k}"] = np.stack(v)
+    g = np.array(gaps["gap"], np.int64)
+    raw["gap"] = g
+    res["by_gap"] = {}
+    for name, (lo, hi) in GAPS.items():
+        sel = (g >= lo) & (g < hi)
+        if sel.any():
+            res["by_gap"][name] = dict(sweeps=int(sel.sum()), **{
+                k: summary([v for v, x in zip(gaps[k], sel) if x], a.n_messages)["mid_bps"]
+                for k in ("real", "sweep", "none")})
     json.dump(res, open(a.out, "w"), indent=1)
     np.savez_compressed(a.out.replace(".json", "_paths.npz"), **raw)
     for b, v in res["buckets"].items():
@@ -258,6 +292,10 @@ def main():
             for k in ("real", "sweep", "none"):
                 if k in v:
                     print(f"  {name:11s} {k:5s}", " ".join(f"{x:8.3f}" for x in v[k][name]["mean"]))
+    for name, v in res["by_gap"].items():
+        print(f"== gap {name}: {v['sweeps']} sweeps, mid_bps at {v['real']['horizons']}")
+        for k in ("real", "sweep", "none"):
+            print(f"  {k:5s}", " ".join(f"{x:8.3f}" for x in v[k]["mean"]))
     print(f"{seconds:.0f} s")
 
 
