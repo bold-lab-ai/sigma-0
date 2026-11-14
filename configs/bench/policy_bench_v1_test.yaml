@@ -8,6 +8,7 @@ shards: /projects/public/u6oz/quant/lob_preproc_sp500_squashfs_v2_20261013
 manifest: /projects/public/u6oz/policy_bench/data/manifest_2026-02.json
 add_dir: /projects/public/u6oz/policy_bench/data/add_index
 episodes: /projects/public/u6oz/policy_bench/data/test_episodes_v1.json
+split: test               # splits.SPLITS; evaluate checks every episode's date against it
 month: 2026-02
 history: 3968            # real rows before an episode (the signal's context)
 n_messages: 1024         # background messages per episode

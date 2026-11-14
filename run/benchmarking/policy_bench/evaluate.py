@@ -32,6 +32,7 @@ from lobpipeline.policy_bench.score import score
 from lobpipeline.policy_bench.signal import Signal
 from lobpipeline.policy_bench.sim_market import SimMarket
 from lobpipeline.policy_bench.simulator import load_newtok
+from lobpipeline.policy_bench.splits import check_episodes
 from lobpipeline.policy_bench.terminal import FlattenTaker, MarkToMicro, MarkToMid
 
 TERMINALS = {"mark_to_mid": MarkToMid, "mark_to_micro": MarkToMicro, "flatten_taker": FlattenTaker}
@@ -61,6 +62,9 @@ def main():
     cfg = yaml.safe_load(open(a.config))
     entries = [e for e in json.load(open(cfg["manifest"])) if e["month"] == cfg["month"]]
     eps = load_episodes(cfg["episodes"], entries)
+    check_episodes(eps, cfg["split"])
+    if cfg["split"] == "test":
+        print("test split: score frozen policies only, once each; never select or fit on the result")
     if a.limit:
         eps = eps[:a.limit]
     policy = load_policy(a.policy, json.loads(a.kwargs))
@@ -78,7 +82,7 @@ def main():
     t0 = time.time()
     traces = rollout(policy, signal, market, eps, every=cfg["every"])
     cost = MakerTaker(rebate=cfg["maker_rebate"], fee=cfg["taker_fee"])
-    res = dict(config=cfg, policy=a.policy, kwargs=json.loads(a.kwargs), market=a.market,
+    res = dict(config=cfg, split=cfg["split"], policy=a.policy, kwargs=json.loads(a.kwargs), market=a.market,
                max_rejections=max_rej if a.market == "sim" else None, latency_ns=latency_ns, episodes=len(eps),
                seconds=time.time() - t0, torch=torch.__version__,
                scores={name: score(traces, TERMINALS[name](), cost) for name in cfg["terminals"]})
