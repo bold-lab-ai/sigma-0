@@ -5,10 +5,32 @@ report its result. Policy search is a separate client of this package.
 
 - Simulator: nano-sigma `newtok_a_r1` (best LOB-Bench on the nano-sigma board).
 - Signal: nano-sigma `returnft_lobert_pass1` (best return and PnL bench).
-- Data: `dataset_q4_2025_jan2026_v3`. Dev is January 2026, test is February 2026.
+- Data: train, dev and test splits by date, all after the models' training data (below).
 
 The state is the L3 order book plus the message log, not tokens. Each model
 encodes its own input from that state.
+
+## Data splits
+
+Two layers. The frozen models were trained and tested on
+`dataset_q4_2025_jan2026_v3`; the bench's own splits all lie after the models'
+training data, because on those months the signal is in-sample and too good.
+
+| layer | split | dates | use |
+|---|---|---|---|
+| models | train | 2025-10 to 2025-12 | trained the simulator and the signal |
+| models | val | 939 windows inside the train months | validation while training |
+| models | test | 2026-01 | the models' test scores |
+| bench | train | 2026-01-02 to 01-15 (10 days) | fit a policy's parameters |
+| bench | dev | 2026-01-16 to 01-30 (10 days) | compare and select policies; never fit on it |
+| bench | test | 2026-02-02 to 02-13 (10 days) | score a frozen policy, once |
+
+Bench train and dev are the models' test month; bench test was built for the
+bench (see `/projects/public/u6oz/policy_bench/data/README.md`) and no model
+has seen it. A date belongs to one split only, because episodes of one date
+share the market. `splits.py` holds the dates; `make_episodes.py --split` draws
+from one split only, and `evaluate.py` refuses an episode outside the config's
+`split`. Nothing before 2026-01-01 may be used by a policy.
 
 ## Modules
 
@@ -29,12 +51,13 @@ encodes its own input from that state.
 | `trace.py` | `Trace` (mids, end book as L10 and as full depth `depth_end`, fills, decisions, signal) and `save` / `load` as one npz. |
 | `costs.py`, `terminal.py`, `score.py` | `MakerTaker` fees; `MarkToMid`, `MarkToMicro`, `FlattenTaker`; `score(traces, terminal, cost)`, a pure function of the traces; the ranking figure is `daily_pnl_usd`. |
 | `episodes.py` | Episode sets. `return_bench_decisions` is nano-sigma's test decision set. |
+| `splits.py` | The train, dev and test dates; `check_episodes` refuses an episode set that leaves its split. |
 | `policies/` | `NoTrade`, `SignRule`, `SkewQuoter`. |
 | `nanosigma/` | Vendored nano-sigma encoding code, byte for byte. See `nanosigma/PROVENANCE.md`. |
 
 ## v1: what is fixed
 
-`configs/bench/policy_bench_v1.yaml` (dev, January 2026) and `policy_bench_v1_test.yaml` (test,
+`configs/bench/policy_bench_v1.yaml` (dev, 2026-01-16 to 01-30) and `policy_bench_v1_test.yaml` (test,
 2026-02-02 to 02-13, run only on frozen policies). Both: 200 episodes of 1,024
 background messages; the simulator's context is the last 2,944 real messages
 and the signal's the last 3,968 rows; a decision every 64 messages; orders

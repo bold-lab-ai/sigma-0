@@ -24,7 +24,7 @@ path that led here is in `/projects/public/u6oz/policy_bench/LOGBOOK.md`.
 | end of episode | the open position is closed against the full end book (taker fee charged) |
 | score | dollar PnL per episode, averaged within each date, then over dates, with its t over dates (`daily_pnl_usd`, `daily_pnl_t`) |
 | rollouts | one per episode; more power comes from more episodes, not repeats |
-| splits | dev: January 2026, 20 days. test: 2026-02-02 to 02-13, 10 days, run only on frozen policies |
+| splits | by whole days, all after the models' training data (2025-10 to 12): train 2026-01-02 to 01-15, dev 01-16 to 01-30, test 02-02 to 02-13, 10 days each; test only for frozen policies, once (`splits.py`) |
 | policy inputs | `Obs` only: L10, position, cash, open orders, orders on their way, fills, the signal |
 
 ## 2. Evidence for each choice
@@ -77,8 +77,9 @@ Every number below carries its job; each result directory has a README.
 
 - The signal takes 9.5 ms per decision at batch 1 on a GH200 (8407649:
   median 9.47 ms, p95 10.08 ms; 3.45 ms CPU inputs, 6.03 ms GPU).
-- Latency sensitivity on dev, SignRule(2, 1), bps of notional after the
-  flatten (results/latency_v2, 8427435-8427443; 100 ms from dev_v1c):
+- Latency sensitivity, SignRule(2, 1), bps of notional after the flatten,
+  on the first dev draw (all January days, before the dated splits;
+  results/latency_v2, 8427435-8427443; 100 ms from dev_v1c):
 
   | latency | 0 | 10 ms | 100 ms | 1 s |
   |---|---|---|---|---|
@@ -100,30 +101,33 @@ Every number below carries its job; each result directory has a README.
 ## 3. Baselines
 
 Ranking figure: `scores.flatten_taker.daily_pnl_usd`, $ per episode averaged
-within each day, then over days, with its t over days. Commit 3d3b110,
-dev 8427420-8427424 (results/dev_v1c), test 8427425-8427429
-(results/test_v1c); NoTrade 8411448 and 8416439. SignRule(index 2, size)
-trades toward sign(signal at 128 messages) times size with market orders;
-SkewQuoter quotes 100 shares at both best prices and drops the side the
-signal argues against by more than 0.5 bps.
+within each day, then over days, with its t over days (10 days per split).
+Each cell gives it for the close (the score) and for mark to mid. Dev
+8439762-8439767 (commit 82360d0, results/dev_v1d), test 8427425-8427429
+(commit 3d3b110, results/test_v1c). SignRule(index 2, size) trades toward
+sign(signal at 128 messages) times size with market orders; SkewQuoter
+quotes 100 shares at both best prices and drops the side the signal argues
+against by more than 0.5 bps.
 
-| policy | market | dev $ (t) | dev bps | test $ (t) | test bps |
-|---|---|---|---|---|---|
-| NoTrade | sim | 0 | | 0 | |
-| SignRule(2, 1) | sim | -1.30 (-9.0) | -3.74 | -1.42 (-6.0) | -4.50 |
-| SignRule(2, 1) | replay | -1.45 (-7.4) | -4.01 | -1.81 (-7.0) | -5.06 |
-| SignRule(2, 100) | sim | -1,092 (-3.8) | -14.12 | -1,306 (-4.5) | -17.47 |
-| SignRule(2, 100) | replay | -332 (-6.2) | -7.95 | -506 (-4.3) | -10.16 |
-| SkewQuoter | sim | -44.6 (-5.0) | -3.44 | -46.0 (-2.1) | -4.06 |
+| policy | market | dev close $ (t) | dev mid $ (t) | dev bps | test close $ (t) | test mid $ (t) | test bps |
+|---|---|---|---|---|---|---|---|
+| NoTrade | sim | 0 | 0 | | 0 | 0 | |
+| SignRule(2, 1) | sim | -0.91 (-9.7) | -0.82 (-9.8) | -3.57 | -1.42 (-6.0) | -1.28 (-5.8) | -4.50 |
+| SignRule(2, 1) | replay | -0.89 (-10.0) | -0.82 (-10.1) | -3.71 | -1.81 (-7.0) | -1.69 (-6.8) | -5.06 |
+| SignRule(2, 100) | sim | -657 (-3.8) | -572 (-3.5) | -11.60 | -1,306 (-4.5) | -1,163 (-4.1) | -17.47 |
+| SignRule(2, 100) | replay | -208 (-6.7) | -195 (-6.7) | -6.83 | -506 (-4.3) | -485 (-4.2) | -10.16 |
+| SkewQuoter | sim | -16.3 (-3.9) | +6.8 (1.9) | -1.95 | -46.0 (-2.1) | +14.3 (1.9) | -4.06 |
+
+bps is after the close, over traded notional.
 
 - No baseline beats NoTrade. The signal's edge at 128 messages is smaller
   than the half spread plus the taker fee, so crossing the spread on it
   loses about 4 bps.
-- SignRule-1 agrees between sim and replay; SignRule-100 loses 6 to 7 bps
+- SignRule-1 agrees between sim and replay; SignRule-100 loses 5 to 7 bps
   more in sim, which is the impact replay cannot have.
-- SkewQuoter is positive marked to mid (+3.2 $ dev, +14.3 $ test) but ends
-  with 160 to 180 shares on average, and the flatten costs more than the
-  spread it earned. Its maker credit is too high anyway (section 4, limit 1).
+- SkewQuoter is positive marked to mid (+6.8 $ dev, +14.3 $ test, t 1.9,
+  not significant) but ends with 160 to 170 shares on average, and the close
+  costs more than the spread it earned. Its maker credit is too high anyway (section 4, limit 1).
 - Why the score closes the position instead of marking it to mid: mark to
   mid lets a policy leave for free (no spread, fee or impact), so a policy
   ranked by it would learn to hold inventory. Both are in every result
@@ -147,7 +151,8 @@ signal argues against by more than 0.5 bps.
    An order leaves `Obs.pending` the moment it reaches the market; a real
    system learns that only from an acknowledgement, later.
 6. Strict FIFO: 96.2% of real executions fill front first (7832642).
-7. Every realism check ran on January dev days.
+7. Every realism check ran on January 2026 (the models' test month), on
+   episodes drawn before the train/dev split.
 
 ## 5. Not done in v1
 
