@@ -170,7 +170,9 @@ signs to every digit, B to the last bit.
 
 ## Throughput
 
-One decoding step at a 67,036-token context, bf16, one GH200 (job 7845818):
-29 ms at batch 1, 40 ms at batch 48 (1,198 tokens/s). The one-row KV cache
-without a mask takes 7.2 ms (G3). Batch 48 is 8.6x that; 200 episodes of 1,024
-messages (about 16 tokens each) take about 46 min.
+One generated token at a 67,036-token context, bf16, one GH200 (job 8449248,
+results/speed): 121 ms without a cache (a full forward over the context),
+7.8 ms with the one-row KV cache, 0.83 ms per token with 48 episodes decoded
+together (40 ms per step), 145x the no-cache time. 200 episodes of 1,024
+messages (about 16 tokens each) are about 3.3M tokens: about 110 h without a
+cache, 46 min batched. A full dev run takes about 80 min (8439762-8439767).

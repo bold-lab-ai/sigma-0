@@ -11,7 +11,7 @@ start row uniformly, kept if the rows from start - history to start + n_messages
 are clear of bad rows, the book at the start has both sides, and the start
 time is inside [t_lo, t_hi] (by default 9:35 to 15:30, away from the opening
 auction and with room before the close).
-The same seed gives the same set; dev and test differ in the manifest month.
+The same seed gives the same set; which dates a set may use is fixed by splits.py.
 """
 
 from __future__ import annotations
