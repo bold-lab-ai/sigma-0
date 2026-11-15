@@ -24,6 +24,7 @@ Add a row when you open the PR, not after.
 
 | Validation-set selection and leakage audit | Jul to Sep 2026 | #51 | Historical scripts at [f1f356bbf6b4](https://github.com/KangOxford/sigma-0/tree/f1f356bbf6b48ac2f48f7610bb55b9c9a72716d8/s5e_scalinglaw/validation) | Frozen valset and uniform Jan-2026 draw | Tables and figures pinned to the same source commit in the write-ups | [Selection rule](validation_sets/README.md), [leakage audit](validation_sets/leakage_audit.md) |
 | LOB-Bench inference trees stored as one SquashFS image | Sep 2026 | #TBD | `src/lobpipeline/storage/sqfs.py`, `run/benchmarking/pack_inference.py`, `pack_gen_wrapper.sh`, `selftrain_checkpoint_generation.batch` | `LOBBENCH_PACK` (default 1), `SIGMA0_SQUASHFS_BIN` | job 6423589 packed and verified 16 trees, 400,872 files to 16 images, 9.8x, all per-file sha256 equal; `lobbench_squashfs/measurements.json` | `lobbench_squashfs/lobbench_file_count.ipynb` |
+| Policy bench v1: closed-loop scoring of policies on our signal | Oct to Nov 2026 | not yet | `src/lobpipeline/policy_bench/`, `run/benchmarking/policy_bench/` | `configs/bench/policy_bench_v1.yaml`, `policy_bench_v1_test.yaml`; data under `/projects/public/u6oz/policy_bench/data/` | `/projects/public/u6oz/policy_bench/results/` (dev_v1d 8439762-8439767, test_v1c 8427425-8427429, latency_v2 8427435-8427443) | `policy_bench_v1/README.md` |
 
 ## Adding an experiment
 

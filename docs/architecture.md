@@ -7,7 +7,7 @@ src/
   base_model/          the LOB sequence-model stack (details below)
   matching_engine/     JAX-LOB engine: price-time priority book, LOBSTER loaders, utils
   environment/         replay environments (jaxen: MARLEnv, MarketMakingAgent) and RL baselines (jaxrl)
-  lobpipeline/         LOB-Bench adapter + vendored scorer, return bench, run/score/package manifests, model store
+  lobpipeline/         LOB-Bench adapter + vendored scorer, return bench, policy bench, run/score/package manifests, model store
   post_training/       heuristic_learning: the closed-loop market-making simulator and its fidelity checks
   state/               the state model: the book resampled as frames on a wall-clock grid, with four post-training methods
 ```
@@ -46,6 +46,12 @@ LOBSTER day files (message + orderbook .npy, L10)
   -> post_training.heuristic_learning                          frozen episodes replayed with a policy in the loop
 ```
 
+`lobpipeline.policy_bench` scores a trading policy in a closed loop against a
+fixed market: a frozen flow model (nano-sigma `newtok_a_r1`) generates the
+background flow on a full L3 book, a frozen signal model feeds the policy, and
+the score is the policy's dollar PnL. It trains nothing; policy search and RL
+that use it belong in `post_training`. See `src/lobpipeline/policy_bench/README.md`.
+
 The engine (`matching_engine.jaxob`) is used twice: inside generation, so that
 generated orders act on a real book, and inside the post-training simulator,
 which settles the policy's own fills. The generator never produces the fills of
@@ -64,6 +70,7 @@ sealed numbers were measured on the originals.
 | `lobpipeline.scorer/lob_bench` | FLAIROx `lob_pipeline` merged three-way with Sat-A `lob_bench` | `src/lobpipeline/scorer/merge.json` records base, both sides and the tree hash; `ci/check_lobbench_merge.py` refuses a drifted tree |
 | `run/base_model/train_full_autoreg.batch`, `node_wrapper.sh` | `/lus/lfs1aip2/projects/public/u6gb/openreview-v2` | restored byte for byte in June 2026, then edited here |
 | `post_training.heuristic_learning` | written in this repository (PR #4 and its follow-ups) | |
+| `lobpipeline.policy_bench` | written in this repository; `nanosigma/` vendored from nano-sigma | `nanosigma/PROVENANCE.md` records the upstream files and their SHA-256 |
 | `state` | written in this repository (PR #38) | |
 | do(Q) injection, `replay_real_msgs_single`, `compute_gt_divergence` | Jess Carr's evaluation work, via LOBelia `380b35f` | archive at `/lus/lfs1aip2/projects/public/u6gb/lob_evals_jcarr/` |
 
