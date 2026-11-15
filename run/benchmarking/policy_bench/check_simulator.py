@@ -17,6 +17,10 @@ D. Batched decoding. --n_batch windows in one BatchKVSimulator, prefilled to
    logits against a one-row KVSimulator fed the same tokens (both
    precisions; C checks that one against the full forward), and the time of one
    step for batch sizes --batch_sizes at a full-window context.
+E. Speed (--only_e). The time of one generated token at a full-window context,
+   bf16, on the first window: without a cache (one full forward over the
+   context), with the one-row KVSimulator, and with BatchKVSimulator at
+   --batch_sizes rows.
 
     python run/benchmarking/policy_bench/check_simulator.py --shard_root <mnt> \
         --manifest <v3>/test.json --ckpt <newtok_a_r1>/ckpt.pt \
@@ -201,6 +205,49 @@ def part_d(model, windows, root, n, sizes, dev, n_steps=128):
     return out
 
 
+@torch.no_grad()
+def part_e(model, windows, root, sizes, dev, n_full=5, n_steps=32):
+    cache = NewTokCache(root, max_open=4)
+    e, s, L = windows[0]
+    t, m, b, _ = read_window_newtok(cache, e, s, L)
+    tok = torch.from_numpy(t).long().to(dev)
+    mi = torch.from_numpy(m).long().to(dev)
+    book = torch.from_numpy(b).to(dev)
+    inp, bk = shift(tok[None])[0], book[mi]
+    ctx = len(inp) - 64
+
+    def ms(f, n):
+        f()
+        torch.cuda.synchronize()
+        t0 = time.time()
+        for _ in range(n):
+            f()
+        torch.cuda.synchronize()
+        return (time.time() - t0) / n * 1e3
+
+    out = dict(message=e["message"], start=s, context_tokens=ctx)
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        out["no_cache_ms"] = ms(lambda: model(inp[None, :ctx + 1], mi[None, :ctx + 1], book[None]), n_full)
+    sim = KVSimulator(model, max_len=len(inp), dtype=torch.bfloat16)
+    sim.feed(inp[:ctx], bk[:ctx])
+    out["kv_one_row_ms"] = ms(lambda: sim.feed(inp[ctx:ctx + 1], bk[ctx:ctx + 1]), n_steps)
+    del sim
+    out["kv_batch"] = []
+    for B in sizes:
+        sim = BatchKVSimulator(model, B, len(inp), torch.bfloat16)
+        for k in range(B):
+            sim.prefill(k, inp[:ctx], bk[:ctx])
+        tk, bb = inp[ctx:ctx + 1].expand(B), bk[ctx:ctx + 1].expand(B, -1)
+        step = ms(lambda: sim.step(tk, bb), n_steps)
+        out["kv_batch"].append(dict(batch=B, step_ms=step, ms_per_token=step / B,
+                                    speedup_vs_no_cache=out["no_cache_ms"] / (step / B)))
+        del sim
+        torch.cuda.empty_cache()
+    out["kv_one_row_speedup"] = out["no_cache_ms"] / out["kv_one_row_ms"]
+    print("E", json.dumps(out), flush=True)
+    return out
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--shard_root", required=True)
@@ -215,6 +262,7 @@ def main():
     p.add_argument("--batch_sizes", default="1,8,16,32,48")
     p.add_argument("--skip_a", action="store_true")
     p.add_argument("--only_d", action="store_true")
+    p.add_argument("--only_e", action="store_true")
     a = p.parse_args()
 
     by_key = {(e["month"], e["message"]): e for e in json.load(open(a.manifest))}
@@ -225,6 +273,10 @@ def main():
     if a.metrics:
         final = [json.loads(x) for x in open(a.metrics) if '"final"' in x][-1]
         res["reference"] = dict(test_ce=final["test_ce"], test_ce_per_msg=final["test_ce_per_msg"])
+    if a.only_e:
+        res["e"] = part_e(model, windows, a.shard_root, [int(x) for x in a.batch_sizes.split(",")], dev)
+        json.dump(res, open(a.out, "w"), indent=1)
+        return
     if a.only_d:
         res["d"] = part_d(model, windows, a.shard_root, a.n_batch, [int(x) for x in a.batch_sizes.split(",")], dev)
         json.dump(res, open(a.out, "w"), indent=1)
